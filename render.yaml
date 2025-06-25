@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: line-supabase-predictor
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    envVars:
+      - key: SUPABASE_URL
+        value: https://yssqfgjvzjzrnjfazgcd.supabase.co
+      - key: SUPABASE_KEY
+        value: YOUR_SUPABASE_ANON_KEY
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        value: YOUR_LINE_CHANNEL_ACCESS_TOKEN
+      - key: LINE_CHANNEL_SECRET
+        value: YOUR_LINE_CHANNEL_SECRET
