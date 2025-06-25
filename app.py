@@ -3,21 +3,25 @@ import uuid
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import (
+    MessageEvent, TextMessage, TextSendMessage,
+    RichMenu, RichMenuSize, RichMenuArea, RichMenuBounds,
+    URIAction, MessageAction
+)
 from supabase import create_client, Client
 
-# Supabase 設定（這裡改成正確的名稱）
+# === Supabase 設定 ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# LINE 設定
+# === LINE 設定 ===
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Flask App
+# === Flask App ===
 app = Flask(__name__)
 
 @app.route("/callback", methods=['POST'])
@@ -30,7 +34,7 @@ def callback():
         abort(400)
     return 'OK'
 
-# 使用者資料處理
+# === 使用者資料處理 ===
 def get_or_create_user(line_user_id):
     res = supabase.table("members").select("*").eq("line_user_id", line_user_id).execute()
     if res.data:
@@ -45,29 +49,65 @@ def get_or_create_user(line_user_id):
         supabase.table("members").insert(new_user).execute()
         return new_user
 
-# 處理 LINE 訊息
+# === Rich Menu 建立 ===
+def setup_rich_menu():
+    rich_menu = RichMenu(
+        size=RichMenuSize(width=2500, height=1686),
+        selected=False,
+        name="Baccarat Menu",
+        chat_bar_text="選擇功能",
+        areas=[
+            RichMenuArea(bounds=RichMenuBounds(0, 0, 500, 1686), action=MessageAction(text="開始預測")),
+            RichMenuArea(bounds=RichMenuBounds(500, 0, 500, 1686), action=MessageAction(text="莊")),
+            RichMenuArea(bounds=RichMenuBounds(1000, 0, 500, 1686), action=MessageAction(text="閒")),
+            RichMenuArea(bounds=RichMenuBounds(1500, 0, 500, 1686), action=MessageAction(text="使用規則")),
+            RichMenuArea(bounds=RichMenuBounds(2000, 0, 500, 1686), action=URIAction(uri="https://wek001.welove777.com")),
+        ]
+    )
+    rich_menu_id = line_bot_api.create_rich_menu(rich_menu)
+    with open("richmenu_baccarat.png", 'rb') as f:
+        line_bot_api.set_rich_menu_image(rich_menu_id, "image/png", f)
+    line_bot_api.set_default_rich_menu(rich_menu_id)
+    print("Rich menu ID:", rich_menu_id)
+
+# === 處理 LINE 訊息 ===
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     line_user_id = event.source.user_id
     msg = event.message.text.strip()
     user = get_or_create_user(line_user_id)
+
     if not user["is_authorized"]:
         reply = (
-            f"🔒 此功能僅限授權使用\n\n"
+            f"\U0001F512 此功能僅限授權使用\n\n"
             f"請將下列 UID 複製給管理員進行開通：\n\n"
-            f"🆔 {user['user_code']}\n\n"
-            f"📲 聯絡管理員：https://lin.ee/2ODINSW"
+            f"\U0001F194 {user['user_code']}\n\n"
+            f"\U0001F4F2 聯絡管理員：https://lin.ee/2ODINSW"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    if msg in ["預測", "開始預測"]:
-        reply = "📊 預測結果：建議下注『莊』，下一局請小心操作！"
+    if msg == "開始預測":
+        reply = "✅ 已啟動預測系統，請選擇『莊』或『閒』"
+    elif msg == "莊":
+        reply = "📊 預測結果：建議下注『莊』"
+    elif msg == "閒":
+        reply = "📊 預測結果：建議下注『閒』"
+    elif msg == "使用規則":
+        reply = (
+            "📘 使用規則：\n"
+            "1. 授權用戶方可使用預測功能\n"
+            "2. 每日建議查看最新預測與趨勢\n"
+            "3. 請遵守資金管理原則\n"
+            "4. 本功能僅供娛樂用途"
+        )
     else:
-        reply = "請輸入『預測』以啟動分析系統"
+        reply = "請從下方選單選擇操作項目"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 if __name__ == "__main__":
+    # 初始化 Rich Menu（部署一次後可註解）
+    # setup_rich_menu()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
 
