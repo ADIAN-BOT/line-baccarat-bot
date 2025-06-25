@@ -108,6 +108,6 @@ def handle_message(event):
 
 if __name__ == "__main__":
     # 初始化 Rich Menu：首次部署請取消註解，之後可關閉避免重複建
-    # setup_rich_menu()
+    setup_rich_menu()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
 
