@@ -1,5 +1,6 @@
 import os
 import uuid
+import random
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -55,7 +56,6 @@ def setup_rich_menu():
         size=RichMenuSize(width=2500, height=1686),
         selected=False,
         name="Baccarat Menu",
-        chat_bar_text="選擇功能",
         areas=[
             RichMenuArea(bounds=RichMenuBounds(0, 0, 500, 1686), action=MessageAction(text="開始預測")),
             RichMenuArea(bounds=RichMenuBounds(500, 0, 500, 1686), action=MessageAction(text="莊")),
@@ -69,6 +69,24 @@ def setup_rich_menu():
         line_bot_api.set_rich_menu_image(rich_menu_id, "image/png", f)
     line_bot_api.set_default_rich_menu(rich_menu_id)
     print("Rich menu ID:", rich_menu_id)
+
+# === AI 模擬預測 ===
+def predict_next_result():
+    res = supabase.table("records").select("result").order("created_at", desc=True).limit(50).execute()
+    results = [r["result"] for r in res.data if r["result"] in ["莊", "閒"]]
+
+    if not results:
+        return 50.0, 50.0, random.choice(["莊", "閒"])
+
+    banker_count = results.count("莊")
+    player_count = results.count("閒")
+    total = banker_count + player_count or 1
+
+    banker_rate = round((banker_count / total) * 100, 1)
+    player_rate = round((player_count / total) * 100, 1)
+    recommend = "莊" if banker_rate > player_rate else "閒"
+
+    return banker_rate, player_rate, recommend
 
 # === 處理 LINE 訊息 ===
 @handler.add(MessageEvent, message=TextMessage)
@@ -89,10 +107,14 @@ def handle_message(event):
 
     if msg == "開始預測":
         reply = "✅ 已啟動預測系統，請選擇『莊』或『閒』"
-    elif msg == "莊":
-        reply = "📊 預測結果：建議下注『莊』"
-    elif msg == "閒":
-        reply = "📊 預測結果：建議下注『閒』"
+    elif msg in ["莊", "閒"]:
+        banker_rate, player_rate, recommend = predict_next_result()
+        reply = (
+            f"📊 AI 勝率分析：\n\n"
+            f"🔴 莊：{banker_rate}%\n"
+            f"🔵 閒：{player_rate}%\n\n"
+            f"📈 預測下一顆建議下注：『{recommend}』"
+        )
     elif msg == "使用規則":
         reply = (
             "📘 使用規則：\n"
@@ -110,4 +132,5 @@ if __name__ == "__main__":
     # 初始化 Rich Menu：首次部署請取消註解，之後可關閉避免重複建
     setup_rich_menu()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+
 
