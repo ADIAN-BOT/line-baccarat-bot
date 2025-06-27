@@ -72,7 +72,7 @@ def setup_rich_menu():
     print("Rich menu created and set:", rich_menu_id)
 
 # === LINE Message 處理 ===
-@handler.add(MessageEvent)
+@handler.add(MessageEvent, message=(TextMessage, ImageMessage))
 def handle_message(event):
     line_user_id = event.source.user_id
     user = get_or_create_user(line_user_id)
