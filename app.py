@@ -1,24 +1,14 @@
-import matplotlib
-matplotlib.use('Agg')  
-
-import matplotlib.pyplot as plt
 import os
 import uuid
-import random
-import io
-import numpy as np
-import cv2
-import matplotlib.pyplot as plt
-from PIL import Image
-from datetime import datetime
-from flask import Flask, request, abort, send_file
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage, ImageMessage, ImageSendMessage
+    MessageEvent, TextMessage, TextSendMessage,
+    RichMenu, RichMenuSize, RichMenuArea, RichMenuBounds,
+    URIAction, MessageAction
 )
 from supabase import create_client, Client
-from tensorflow.keras.models import load_model
 
 # === Supabase 設定 ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -44,11 +34,6 @@ def callback():
         abort(400)
     return 'OK'
 
-@app.route("/trend.png")
-def trend_png():
-    buffer = generate_trend_chart()
-    return send_file(buffer, mimetype='image/png')
-
 # === 使用者資料處理 ===
 def get_or_create_user(line_user_id):
     res = supabase.table("members").select("*").eq("line_user_id", line_user_id).execute()
@@ -64,106 +49,68 @@ def get_or_create_user(line_user_id):
         supabase.table("members").insert(new_user).execute()
         return new_user
 
-# === 勝率圖表 ===
-def generate_trend_chart():
-    res = supabase.table("records").select("*").order("created_at", desc=False).limit(30).execute()
-    records = res.data
-    if not records:
-        return io.BytesIO()
+# === Rich Menu 建立 ===
+def setup_rich_menu():
+    rich_menu = RichMenu(
+        size=RichMenuSize(width=2500, height=1686),
+        selected=False,
+        name="Baccarat Menu",
+        chat_bar_text="選擇功能",
+        areas=[
+            RichMenuArea(bounds=RichMenuBounds(0, 0, 500, 1686), action=MessageAction(text="開始預測")),
+            RichMenuArea(bounds=RichMenuBounds(500, 0, 500, 1686), action=MessageAction(text="莊")),
+            RichMenuArea(bounds=RichMenuBounds(1000, 0, 500, 1686), action=MessageAction(text="閒")),
+            RichMenuArea(bounds=RichMenuBounds(1500, 0, 500, 1686), action=MessageAction(text="使用規則")),
+            RichMenuArea(bounds=RichMenuBounds(2000, 0, 500, 1686), action=URIAction(uri="https://wek001.welove777.com")),
+        ]
+    )
+    rich_menu_id = line_bot_api.create_rich_menu(rich_menu)
+    with open("richmenu_baccarat.png", 'rb') as f:
+        line_bot_api.set_rich_menu_image(rich_menu_id, "image/png", f)
+    line_bot_api.set_default_rich_menu(rich_menu_id)
+    print("Rich menu created and set:", rich_menu_id)
 
-    labels = [r['created_at'][11:16] for r in records]
-    values = [1 if r['result'] == "莊" else 0 for r in records if r['result'] in ["莊", "閒"]]
-    avg = [np.mean(values[:i+1]) * 100 for i in range(len(values))]
-
-    plt.figure(figsize=(10, 4))
-    plt.plot(avg, label='莊方勝率(%)', color='red', marker='o')
-    plt.xticks(ticks=range(len(labels)), labels=labels, rotation=45)
-    plt.ylim(0, 100)
-    plt.grid(True)
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    return buf
-
-# === 圖像辨識分析走勢圖 ===
-def analyze_roadmap_image(img_path):
-    img = cv2.imread(img_path)
-    result_seq = []
-    circles = []
-
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    red_mask1 = cv2.inRange(hsv, (0, 70, 50), (10, 255, 255))
-    red_mask2 = cv2.inRange(hsv, (170, 70, 50), (180, 255, 255))
-    blue_mask = cv2.inRange(hsv, (100, 100, 100), (130, 255, 255))
-    green_mask = cv2.inRange(hsv, (40, 100, 100), (80, 255, 255))
-    red_mask = cv2.bitwise_or(red_mask1, red_mask2)
-
-    def detect_centers(mask, label):
-        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if 50 < area < 1500:
-                M = cv2.moments(cnt)
-                if M['m00'] != 0:
-                    cx = int(M['m10']/M['m00'])
-                    cy = int(M['m01']/M['m00'])
-                    circles.append((cx, cy, label))
-
-    detect_centers(red_mask, "莊")
-    detect_centers(blue_mask, "閒")
-    detect_centers(green_mask, "和")
-
-    circles.sort(key=lambda x: (x[0], x[1]))
-    result_seq = [c[2] for c in circles]
-
-    for r in result_seq:
-        supabase.table("records").insert({"result": r}).execute()
-
-    sequence = [1 if r == "莊" else 0 for r in result_seq if r in ["莊", "閒"]][-10:]
-    if len(sequence) < 10:
-        return 50.0, 50.0, "無法分析（資料不足）"
-
-    model = load_model("baccarat_lstm_model.h5")
-    X = np.array(sequence).reshape((1, 10, 1))
-    pred = model.predict(X)[0][0]
-    banker_rate = round(pred * 100, 1)
-    player_rate = round((1 - pred) * 100, 1)
-    recommend = "莊" if pred >= 0.5 else "閒"
-    return banker_rate, player_rate, recommend
-
-# === LINE Message Event ===
-@handler.add(MessageEvent)
-def handle_event(event):
+# === LINE Message 處理 ===
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
     line_user_id = event.source.user_id
+    msg = event.message.text.strip()
     user = get_or_create_user(line_user_id)
 
-    if isinstance(event.message, TextMessage):
-        text = event.message.text.strip()
-        if text in ["上一顆：莊", "上一顆：閒"]:
-            result = text.replace("上一顆：", "")
-            supabase.table("records").insert({"line_user_id": line_user_id, "result": result}).execute()
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已紀錄上一顆開『{result}』，接下來將持續分析下一顆走勢。"))
-        else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確格式，例如：上一顆：莊 或 上一顆：閒"))
-
-    elif isinstance(event.message, ImageMessage):
-        message_id = event.message.id
-        img_path = f"/tmp/{message_id}.jpg"
-        content = line_bot_api.get_message_content(message_id)
-        with open(img_path, "wb") as f:
-            for chunk in content.iter_content():
-                f.write(chunk)
-
-        banker_rate, player_rate, recommend = analyze_roadmap_image(img_path)
+    if not user["is_authorized"]:
         reply = (
-            f"📸 圖像分析結果：\n\n"
-            f"🔴 莊：{banker_rate}%\n"
-            f"🔵 閒：{player_rate}%\n\n"
-            f"📈 預測下一顆建議下注：『{recommend}』"
+            f"\U0001F512 此功能僅限授權使用\n\n"
+            f"請將下列 UID 複製給管理員進行開通：\n\n"
+            f"\U0001F194 {user['user_code']}\n\n"
+            f"\U0001F4F2 聯絡管理員：https://lin.ee/2ODINSW"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+
+    if msg == "開始預測":
+        reply = "✅ 已啟動預測系統，請選擇『莊』或『閒』"
+    elif msg == "莊":
+        reply = "📊 預測結果：建議下注『莊』"
+    elif msg == "閒":
+        reply = "📊 預測結果：建議下注『閒』"
+    elif msg == "使用規則":
+        reply = (
+            "📘 使用規則：\n"
+            "1. 授權用戶方可使用預測功能\n"
+            "2. 每日建議查看最新預測與趨勢\n"
+            "3. 請遵守資金管理原則\n"
+            "4. 本功能僅供娛樂用途"
+        )
+    else:
+        reply = "請從下方選單選擇操作項目"
+
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+if __name__ == "__main__":
+    # 首次部署時打開這行設定 Rich Menu
+    # setup_rich_menu()
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
