@@ -2,17 +2,21 @@ import os
 import uuid
 import random
 import io
+import numpy as np
+import cv2
 import matplotlib.pyplot as plt
+from PIL import Image
 from datetime import datetime
 from flask import Flask, request, abort, send_file
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage, ImageSendMessage,
+    MessageEvent, TextMessage, TextSendMessage, ImageMessage, ImageSendMessage,
     RichMenu, RichMenuSize, RichMenuArea, RichMenuBounds,
     URIAction, MessageAction
 )
 from supabase import create_client, Client
+from tensorflow.keras.models import load_model
 
 # === Supabase 設定 ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -58,121 +62,70 @@ def get_or_create_user(line_user_id):
         supabase.table("members").insert(new_user).execute()
         return new_user
 
-# === Rich Menu 建立 ===
-def setup_rich_menu():
-    rich_menu = RichMenu(
-        size=RichMenuSize(width=2500, height=1686),
-        selected=False,
-        name="Baccarat Menu",
-        areas=[
-            RichMenuArea(bounds=RichMenuBounds(0, 0, 500, 1686), action=MessageAction(text="開始預測")),
-            RichMenuArea(bounds=RichMenuBounds(500, 0, 500, 1686), action=MessageAction(text="莊")),
-            RichMenuArea(bounds=RichMenuBounds(1000, 0, 500, 1686), action=MessageAction(text="閒")),
-            RichMenuArea(bounds=RichMenuBounds(1500, 0, 500, 1686), action=MessageAction(text="使用規則")),
-            RichMenuArea(bounds=RichMenuBounds(2000, 0, 500, 1686), action=URIAction(uri="https://wek001.welove777.com")),
-        ]
-    )
-    rich_menu_id = line_bot_api.create_rich_menu(rich_menu)
-    with open("richmenu_baccarat.png", 'rb') as f:
-        line_bot_api.set_rich_menu_image(rich_menu_id, "image/png", f)
-    line_bot_api.set_default_rich_menu(rich_menu_id)
-    print("Rich menu ID:", rich_menu_id)
+# === 圖像辨識分析走勢圖（簡化為紅=莊，藍=閒） ===
+def analyze_roadmap_image(img_path):
+    img = cv2.imread(img_path)
+    result_seq = []
+    circles = []
 
-# === AI 模擬預測 ===
-def predict_next_result():
-    res = supabase.table("records").select("result").order("created_at", desc=True).limit(50).execute()
-    results = [r["result"] for r in res.data if r["result"] in ["莊", "閒"]]
+    # 設定 HSV 顏色範圍擷取顏色圓形
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    red_mask1 = cv2.inRange(hsv, (0, 70, 50), (10, 255, 255))
+    red_mask2 = cv2.inRange(hsv, (170, 70, 50), (180, 255, 255))
+    blue_mask = cv2.inRange(hsv, (100, 100, 100), (130, 255, 255))
+    green_mask = cv2.inRange(hsv, (40, 100, 100), (80, 255, 255))
 
-    if not results:
-        return 50.0, 50.0, random.choice(["莊", "閒"])
+    # 合併紅色遮罩
+    red_mask = cv2.bitwise_or(red_mask1, red_mask2)
 
-    banker_count = results.count("莊")
-    player_count = results.count("閒")
-    total = banker_count + player_count or 1
+    def detect_centers(mask, label):
+        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if 50 < area < 1500:
+                M = cv2.moments(cnt)
+                if M['m00'] != 0:
+                    cx = int(M['m10']/M['m00'])
+                    cy = int(M['m01']/M['m00'])
+                    circles.append((cx, cy, label))
 
-    banker_rate = round((banker_count / total) * 100, 1)
-    player_rate = round((player_count / total) * 100, 1)
-    recommend = "莊" if banker_rate > player_rate else "閒"
+    detect_centers(red_mask, "莊")
+    detect_centers(blue_mask, "閒")
+    detect_centers(green_mask, "和")
 
+    # 依照 x 排序（橫向時間序）
+    circles.sort(key=lambda x: (x[0], x[1]))
+    result_seq = [c[2] for c in circles]
+
+    # 轉成數值並輸入模型
+    sequence = [1 if r == "莊" else 0 for r in result_seq if r in ["莊", "閒"]][-10:]
+    if len(sequence) < 10:
+        return 50.0, 50.0, "無法分析（資料不足）"
+
+    model = load_model("baccarat_lstm_model.h5")
+    X = np.array(sequence).reshape((1, 10, 1))
+    pred = model.predict(X)[0][0]
+    banker_rate = round(pred * 100, 1)
+    player_rate = round((1 - pred) * 100, 1)
+    recommend = "莊" if pred >= 0.5 else "閒"
     return banker_rate, player_rate, recommend
 
-# === 圖形化勝率走勢圖 ===
-def generate_trend_chart():
-    res = supabase.table("records").select("result", "created_at").order("created_at").limit(50).execute()
-    results = [r for r in res.data if r["result"] in ["莊", "閒"]]
+# === 處理圖片訊息（會員上傳走勢圖） ===
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image(event):
+    message_id = event.message.id
+    img_path = f"/tmp/{message_id}.jpg"
+    content = line_bot_api.get_message_content(message_id)
+    with open(img_path, "wb") as f:
+        for chunk in content.iter_content():
+            f.write(chunk)
 
-    banker_counts, player_counts, timeline = [], [], []
-    b, p = 0, 0
-    for r in results:
-        if r['result'] == "莊": b += 1
-        elif r['result'] == "閒": p += 1
-        total = b + p
-        banker_counts.append(b / total * 100)
-        player_counts.append(p / total * 100)
-        timeline.append(r['created_at'])
-
-    plt.figure(figsize=(8, 4))
-    plt.plot(timeline, banker_counts, label="莊勝率", color='red')
-    plt.plot(timeline, player_counts, label="閒勝率", color='blue')
-    plt.legend()
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    buffer = io.BytesIO()
-    plt.savefig(buffer, format='png')
-    buffer.seek(0)
-    return buffer
-
-# === 處理 LINE 訊息 ===
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    line_user_id = event.source.user_id
-    msg = event.message.text.strip()
-    user = get_or_create_user(line_user_id)
-
-    if not user["is_authorized"]:
-        reply = (
-            f"\U0001F512 此功能僅限授權使用\n\n"
-            f"請將下列 UID 複製給管理員進行開通：\n\n"
-            f"\U0001F194 {user['user_code']}\n\n"
-            f"\U0001F4F2 聯絡管理員：https://lin.ee/2ODINSW"
-        )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-        return
-
-    if msg == "開始預測":
-        reply = "✅ 已啟動預測系統，請選擇『莊』或『閒』"
-    elif msg in ["莊", "閒"]:
-        supabase.table("records").insert({"line_user_id": line_user_id, "result": msg}).execute()
-        banker_rate, player_rate, recommend = predict_next_result()
-        reply = (
-            f"📊 AI 勝率分析：\n\n"
-            f"🔴 莊：{banker_rate}%\n"
-            f"🔵 閒：{player_rate}%\n\n"
-            f"📈 預測下一顆建議下注：『{recommend}』"
-        )
-        line_bot_api.reply_message(event.reply_token, [
-            TextSendMessage(text=reply),
-            ImageSendMessage(
-                original_content_url="https://你的網址/trend.png",
-                preview_image_url="https://你的網址/trend.png"
-            )
-        ])
-        return
-    elif msg == "使用規則":
-        reply = (
-            "📘 使用規則：\n"
-            "1. 授權用戶方可使用預測功能\n"
-            "2. 每日建議查看最新預測與趨勢\n"
-            "3. 請遵守資金管理原則\n"
-            "4. 本功能僅供娛樂用途"
-        )
-    else:
-        reply = "請從下方選單選擇操作項目"
-
+    banker_rate, player_rate, recommend = analyze_roadmap_image(img_path)
+    reply = (
+        f"📸 圖像分析結果：\n\n"
+        f"🔴 莊：{banker_rate}%\n"
+        f"🔵 閒：{player_rate}%\n\n"
+        f"📈 預測下一顆建議下注：『{recommend}』"
+    )
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
-if __name__ == "__main__":
-    setup_rich_menu()
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
-
 
