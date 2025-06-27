@@ -1,4 +1,8 @@
 flask
 line-bot-sdk
-python-dotenv
 supabase
+numpy
+opencv-python-headless
+Pillow
+tensorflow
+matplotlib
