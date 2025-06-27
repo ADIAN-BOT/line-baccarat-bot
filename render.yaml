@@ -14,5 +14,5 @@ services:
         value: YOUR_LINE_CHANNEL_ACCESS_TOKEN
       - key: LINE_CHANNEL_SECRET
         value: YOUR_LINE_CHANNEL_SECRET
-build:
-  pythonVersion: 3.10
+    build:
+      pythonVersion: 3.10  
