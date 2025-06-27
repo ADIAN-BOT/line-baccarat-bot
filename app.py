@@ -1,14 +1,17 @@
 import os
 import uuid
+import io
+import numpy as np
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage,
+    MessageEvent, TextMessage, TextSendMessage, ImageMessage,
     RichMenu, RichMenuSize, RichMenuArea, RichMenuBounds,
     URIAction, MessageAction
 )
 from supabase import create_client, Client
+from prediction_model import analyze_image_and_predict
 
 # === Supabase 設定 ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -57,11 +60,11 @@ def setup_rich_menu():
         name="Baccarat Menu",
         chat_bar_text="選擇功能",
         areas=[
-            RichMenuArea(bounds=RichMenuBounds(0, 0, 500, 1686), action=MessageAction(text="開始預測")),
-            RichMenuArea(bounds=RichMenuBounds(500, 0, 500, 1686), action=MessageAction(text="莊")),
-            RichMenuArea(bounds=RichMenuBounds(1000, 0, 500, 1686), action=MessageAction(text="閒")),
-            RichMenuArea(bounds=RichMenuBounds(1500, 0, 500, 1686), action=MessageAction(text="使用規則")),
-            RichMenuArea(bounds=RichMenuBounds(2000, 0, 500, 1686), action=URIAction(uri="https://wek001.welove777.com")),
+            RichMenuArea(bounds=RichMenuBounds(0, 0, 833, 843), action=MessageAction(text="開始預測")),
+            RichMenuArea(bounds=RichMenuBounds(833, 0, 833, 843), action=MessageAction(text="上閒")),
+            RichMenuArea(bounds=RichMenuBounds(1666, 0, 834, 843), action=MessageAction(text="上莊")),
+            RichMenuArea(bounds=RichMenuBounds(0, 843, 1250, 843), action=MessageAction(text="使用規則")),
+            RichMenuArea(bounds=RichMenuBounds(1250, 843, 1250, 843), action=URIAction(uri="https://wek001.welove777.com"))
         ]
     )
     rich_menu_id = line_bot_api.create_rich_menu(rich_menu)
@@ -71,10 +74,9 @@ def setup_rich_menu():
     print("Rich menu created and set:", rich_menu_id)
 
 # === LINE Message 處理 ===
-@handler.add(MessageEvent, message=TextMessage)
+@handler.add(MessageEvent)
 def handle_message(event):
     line_user_id = event.source.user_id
-    msg = event.message.text.strip()
     user = get_or_create_user(line_user_id)
 
     if not user["is_authorized"]:
@@ -87,30 +89,43 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
 
-    if msg == "開始預測":
-        reply = "✅ 已啟動預測系統，請選擇『莊』或『閒』"
-    elif msg == "莊":
-        reply = "📊 預測結果：建議下注『莊』"
-    elif msg == "閒":
-        reply = "📊 預測結果：建議下注『閒』"
-    elif msg == "使用規則":
+    if isinstance(event.message, TextMessage):
+        msg = event.message.text.strip()
+        if msg == "開始預測":
+            reply = "✅ 已啟動預測系統，請點選『上莊』或『上閒』，並上傳圖片以獲得下一顆預測"
+        elif msg == "上莊" or msg == "上閒":
+            last = "莊" if "莊" in msg else "閒"
+            supabase.table("records").insert({"line_user_id": line_user_id, "result": last}).execute()
+            reply = f"✅ 已紀錄上一顆為『{last}』，請上傳大路圖圖片進行下一顆預測"
+        elif msg == "使用規則":
+            reply = (
+                "📘 使用規則：\n"
+                "1. 授權用戶方可使用預測功能\n"
+                "2. 每日建議查看最新預測與趨勢\n"
+                "3. 請遵守資金管理原則\n"
+                "4. 本功能僅供娛樂用途"
+            )
+        else:
+            reply = "請從下方選單選擇操作項目"
+
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+    elif isinstance(event.message, ImageMessage):
+        message_id = event.message.id
+        img_path = f"/tmp/{message_id}.jpg"
+        content = line_bot_api.get_message_content(message_id)
+        with open(img_path, "wb") as f:
+            for chunk in content.iter_content():
+                f.write(chunk)
+
+        last_result, banker_rate, player_rate, predict = analyze_image_and_predict(img_path, supabase)
         reply = (
-            "📘 使用規則：\n"
-            "1. 授權用戶方可使用預測功能\n"
-            "2. 每日建議查看最新預測與趨勢\n"
-            "3. 請遵守資金管理原則\n"
-            "4. 本功能僅供娛樂用途"
+            f"📸 已判斷上一顆為：{last_result}\n"
+            f"🔴 預測莊：{banker_rate}%\n"
+            f"🔵 預測閒：{player_rate}%\n\n"
+            f"📈 建議下一顆下注：『{predict}』"
         )
-    else:
-        reply = "請從下方選單選擇操作項目"
-
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 if __name__ == "__main__":
-    # 首次部署時打開這行設定 Rich Menu
-    # setup_rich_menu()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
