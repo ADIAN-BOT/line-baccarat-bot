@@ -1,11 +1,14 @@
 import os
 import uuid
 import random
-from flask import Flask, request, abort
+import io
+import matplotlib.pyplot as plt
+from datetime import datetime
+from flask import Flask, request, abort, send_file
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage,
+    MessageEvent, TextMessage, TextSendMessage, ImageSendMessage,
     RichMenu, RichMenuSize, RichMenuArea, RichMenuBounds,
     URIAction, MessageAction
 )
@@ -34,6 +37,11 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     return 'OK'
+
+@app.route("/trend.png")
+def trend_png():
+    buffer = generate_trend_chart()
+    return send_file(buffer, mimetype='image/png')
 
 # === 使用者資料處理 ===
 def get_or_create_user(line_user_id):
@@ -88,6 +96,32 @@ def predict_next_result():
 
     return banker_rate, player_rate, recommend
 
+# === 圖形化勝率走勢圖 ===
+def generate_trend_chart():
+    res = supabase.table("records").select("result", "created_at").order("created_at").limit(50).execute()
+    results = [r for r in res.data if r["result"] in ["莊", "閒"]]
+
+    banker_counts, player_counts, timeline = [], [], []
+    b, p = 0, 0
+    for r in results:
+        if r['result'] == "莊": b += 1
+        elif r['result'] == "閒": p += 1
+        total = b + p
+        banker_counts.append(b / total * 100)
+        player_counts.append(p / total * 100)
+        timeline.append(r['created_at'])
+
+    plt.figure(figsize=(8, 4))
+    plt.plot(timeline, banker_counts, label="莊勝率", color='red')
+    plt.plot(timeline, player_counts, label="閒勝率", color='blue')
+    plt.legend()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    buffer = io.BytesIO()
+    plt.savefig(buffer, format='png')
+    buffer.seek(0)
+    return buffer
+
 # === 處理 LINE 訊息 ===
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -108,6 +142,7 @@ def handle_message(event):
     if msg == "開始預測":
         reply = "✅ 已啟動預測系統，請選擇『莊』或『閒』"
     elif msg in ["莊", "閒"]:
+        supabase.table("records").insert({"line_user_id": line_user_id, "result": msg}).execute()
         banker_rate, player_rate, recommend = predict_next_result()
         reply = (
             f"📊 AI 勝率分析：\n\n"
@@ -115,6 +150,14 @@ def handle_message(event):
             f"🔵 閒：{player_rate}%\n\n"
             f"📈 預測下一顆建議下注：『{recommend}』"
         )
+        line_bot_api.reply_message(event.reply_token, [
+            TextSendMessage(text=reply),
+            ImageSendMessage(
+                original_content_url="https://你的網址/trend.png",
+                preview_image_url="https://你的網址/trend.png"
+            )
+        ])
+        return
     elif msg == "使用規則":
         reply = (
             "📘 使用規則：\n"
@@ -129,7 +172,6 @@ def handle_message(event):
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 if __name__ == "__main__":
-    # 初始化 Rich Menu：首次部署請取消註解，之後可關閉避免重複建
     setup_rich_menu()
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
 
