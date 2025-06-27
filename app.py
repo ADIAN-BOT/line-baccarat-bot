@@ -129,31 +129,35 @@ def analyze_roadmap_image(img_path):
     recommend = "莊" if pred >= 0.5 else "閒"
     return banker_rate, player_rate, recommend
 
-# === 手動輸入處理（上一顆結果） ===
-@handler.add(MessageEvent, message=TextMessage)
-def handle_manual_result(event):
+# === LINE Message Event ===
+@handler.add(MessageEvent)
+def handle_event(event):
     line_user_id = event.source.user_id
-    text = event.message.text.strip()
-    if text in ["上一顆：莊", "上一顆：閒"]:
-        result = text.replace("上一顆：", "")
-        supabase.table("records").insert({"line_user_id": line_user_id, "result": result}).execute()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已紀錄上一顆開『{result}』，接下來將持續分析下一顆走勢。"))
-        return
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
-    message_id = event.message.id
-    img_path = f"/tmp/{message_id}.jpg"
-    content = line_bot_api.get_message_content(message_id)
-    with open(img_path, "wb") as f:
-        for chunk in content.iter_content():
-            f.write(chunk)
+    user = get_or_create_user(line_user_id)
 
-    banker_rate, player_rate, recommend = analyze_roadmap_image(img_path)
-    reply = (
-        f"📸 圖像分析結果：\n\n"
-        f"🔴 莊：{banker_rate}%\n"
-        f"🔵 閒：{player_rate}%\n\n"
-        f"📈 預測下一顆建議下注：『{recommend}』"
-    )
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    if isinstance(event.message, TextMessage):
+        text = event.message.text.strip()
+        if text in ["上一顆：莊", "上一顆：閒"]:
+            result = text.replace("上一顆：", "")
+            supabase.table("records").insert({"line_user_id": line_user_id, "result": result}).execute()
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已紀錄上一顆開『{result}』，接下來將持續分析下一顆走勢。"))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確格式，例如：上一顆：莊 或 上一顆：閒"))
+
+    elif isinstance(event.message, ImageMessage):
+        message_id = event.message.id
+        img_path = f"/tmp/{message_id}.jpg"
+        content = line_bot_api.get_message_content(message_id)
+        with open(img_path, "wb") as f:
+            for chunk in content.iter_content():
+                f.write(chunk)
+
+        banker_rate, player_rate, recommend = analyze_roadmap_image(img_path)
+        reply = (
+            f"📸 圖像分析結果：\n\n"
+            f"🔴 莊：{banker_rate}%\n"
+            f"🔵 閒：{player_rate}%\n\n"
+            f"📈 預測下一顆建議下注：『{recommend}』"
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
