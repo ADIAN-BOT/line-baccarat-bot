@@ -11,9 +11,7 @@ from flask import Flask, request, abort, send_file
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage, ImageMessage, ImageSendMessage,
-    RichMenu, RichMenuSize, RichMenuArea, RichMenuBounds,
-    URIAction, MessageAction
+    MessageEvent, TextMessage, TextSendMessage, ImageMessage, ImageSendMessage
 )
 from supabase import create_client, Client
 from tensorflow.keras.models import load_model
@@ -62,20 +60,40 @@ def get_or_create_user(line_user_id):
         supabase.table("members").insert(new_user).execute()
         return new_user
 
-# === 圖像辨識分析走勢圖（簡化為紅=莊，藍=閒） ===
+# === 勝率圖表 ===
+def generate_trend_chart():
+    res = supabase.table("records").select("*").order("created_at", desc=False).limit(30).execute()
+    records = res.data
+    if not records:
+        return io.BytesIO()
+
+    labels = [r['created_at'][11:16] for r in records]
+    values = [1 if r['result'] == "莊" else 0 for r in records if r['result'] in ["莊", "閒"]]
+    avg = [np.mean(values[:i+1]) * 100 for i in range(len(values))]
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(avg, label='莊方勝率(%)', color='red', marker='o')
+    plt.xticks(ticks=range(len(labels)), labels=labels, rotation=45)
+    plt.ylim(0, 100)
+    plt.grid(True)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    return buf
+
+# === 圖像辨識分析走勢圖 ===
 def analyze_roadmap_image(img_path):
     img = cv2.imread(img_path)
     result_seq = []
     circles = []
 
-    # 設定 HSV 顏色範圍擷取顏色圓形
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     red_mask1 = cv2.inRange(hsv, (0, 70, 50), (10, 255, 255))
     red_mask2 = cv2.inRange(hsv, (170, 70, 50), (180, 255, 255))
     blue_mask = cv2.inRange(hsv, (100, 100, 100), (130, 255, 255))
     green_mask = cv2.inRange(hsv, (40, 100, 100), (80, 255, 255))
-
-    # 合併紅色遮罩
     red_mask = cv2.bitwise_or(red_mask1, red_mask2)
 
     def detect_centers(mask, label):
@@ -93,11 +111,12 @@ def analyze_roadmap_image(img_path):
     detect_centers(blue_mask, "閒")
     detect_centers(green_mask, "和")
 
-    # 依照 x 排序（橫向時間序）
     circles.sort(key=lambda x: (x[0], x[1]))
     result_seq = [c[2] for c in circles]
 
-    # 轉成數值並輸入模型
+    for r in result_seq:
+        supabase.table("records").insert({"result": r}).execute()
+
     sequence = [1 if r == "莊" else 0 for r in result_seq if r in ["莊", "閒"]][-10:]
     if len(sequence) < 10:
         return 50.0, 50.0, "無法分析（資料不足）"
@@ -110,7 +129,7 @@ def analyze_roadmap_image(img_path):
     recommend = "莊" if pred >= 0.5 else "閒"
     return banker_rate, player_rate, recommend
 
-# === 處理圖片訊息（會員上傳走勢圖） ===
+# === 圖片訊息處理 ===
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image(event):
     message_id = event.message.id
@@ -128,4 +147,3 @@ def handle_image(event):
         f"📈 預測下一顆建議下注：『{recommend}』"
     )
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
