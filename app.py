@@ -9,7 +9,7 @@ from linebot.models import (
     URIAction, MessageAction, ImageMessage
 )
 from supabase import create_client, Client
-from prediction_model import analyze_and_predict
+from prediction_model import analyze_and_predict, model
 
 # === Supabase 設定 ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -90,11 +90,7 @@ def handle_message(event):
     if isinstance(event.message, TextMessage):
         msg = event.message.text.strip()
         if msg == "開始預測":
-            reply = "✅ 已啟動預測系統，請選擇『莊』或『閒』"
-        elif msg == "莊":
-            reply = "📊 預測結果：建議下注『莊』"
-        elif msg == "閒":
-            reply = "📊 預測結果：建議下注『閒』"
+            reply = "✅ 已啟動預測系統，請上傳最新路圖圖片"
         elif msg == "使用規則":
             reply = (
                 "📘 使用規則：\n"
@@ -103,8 +99,11 @@ def handle_message(event):
                 "3. 請遵守資金管理原則\n"
                 "4. 本功能僅供娛樂用途"
             )
+        elif msg in ["莊", "閒"]:
+            supabase.table("records").insert({"line_user_id": line_user_id, "result": msg}).execute()
+            reply = f"✅ 已紀錄：{msg}"
         else:
-            reply = "請從下方選單選擇操作項目"
+            reply = "請輸入正確指令或上傳圖片進行預測"
 
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
@@ -116,28 +115,38 @@ def handle_message(event):
             for chunk in content.iter_content():
                 f.write(chunk)
 
-        # 先回覆接收成功，避免 token 失效
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
 
         banker, player, suggestion = analyze_and_predict(img_path, line_user_id)
 
-        # 查詢最新一筆結果（即上一顆開莊還是閒）
-        latest = supabase.table("records").select("result").eq("line_user_id", line_user_id).order("id", desc=True).limit(1).execute()
-        last_result = latest.data[0]['result'] if latest.data else "無紀錄"
+        # 新增紀錄進 DB
+        supabase.table("records").insert({"line_user_id": line_user_id, "result": suggestion}).execute()
 
-        result_msg = (
-            f"📸 圖像辨識完成\n\n"
-            f"🔙 上一顆開：{last_result}\n"
-            f"🔴 莊勝率：{banker}%\n"
-            f"🔵 閒勝率：{player}%\n\n"
-            f"📈 建議下注：{suggestion}"
-        )
+        # 查詢上一顆
+        latest = supabase.table("records").select("result").eq("line_user_id", line_user_id).order("id", desc=True).limit(2).execute()
+        last_result = latest.data[1]['result'] if len(latest.data) >= 2 else "無紀錄"
 
-        # 使用 push_message 傳送預測結果
-        line_bot_api.push_message(line_user_id, TextSendMessage(text=result_msg))
+        # 查詢最近10顆做預測
+        recent = supabase.table("records").select("result").eq("line_user_id", line_user_id).order("id", desc=True).limit(10).execute()
+        records = [r["result"] for r in reversed(recent.data)]
+
+        if len(records) < 10:
+            pred_msg = "預測樣本不足，請先上傳更多路圖或輸入莊/閒"
+        else:
+            feature = [1 if r == "莊" else 0 for r in records]
+            pred = model.predict_proba([feature])[0]
+            b, p = round(pred[1]*100, 1), round(pred[0]*100, 1)
+            recommend = "莊" if pred[1] >= pred[0] else "閒"
+            pred_msg = (
+                f"🔙 上一顆開：{last_result}\n"
+                f"🔴 莊勝率：{b}%\n"
+                f"🔵 閒勝率：{p}%\n"
+                f"📈 AI 推論下一顆：{recommend}"
+            )
+
+        line_bot_api.push_message(line_user_id, TextSendMessage(text=pred_msg))
 
 if __name__ == "__main__":
-    # 首次部署時打開這行設定 Rich Menu
-    # setup_rich_menu()
+    # setup_rich_menu()  # 首次部署開啟
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
 
