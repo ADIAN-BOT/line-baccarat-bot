@@ -7,4 +7,4 @@ Pillow
 tensorflow==2.12.0
 matplotlib
 joblib
-scikit-learn
+scikit-learn==1.1.3
