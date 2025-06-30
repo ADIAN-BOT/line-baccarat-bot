@@ -61,23 +61,7 @@ def analyze_and_predict(image_path, user_id):
     banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
     suggestion = "莊" if pred[1] >= pred[0] else "閒"
 
-    # 寫入這顆推論結果（作為實際開獎後記錄）
-    supabase.table("records").insert({"line_user_id": user_id, "result": suggestion}).execute()
-
-    # 再次預測下一顆
-    history2 = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
-    records2 = [r["result"] for r in reversed(history2.data)]
-
-    if len(records2) < 10:
-        next_predict = "紀錄不足"
-        b2, p2 = 0.0, 0.0
-    else:
-        feature2 = [1 if r == "莊" else 0 for r in records2]
-        pred2 = model.predict_proba([feature2])[0]
-        b2, p2 = round(pred2[1]*100, 1), round(pred2[0]*100, 1)
-        next_predict = "莊" if pred2[1] >= pred2[0] else "閒"
-
-    return last_result, banker, player, suggestion, b2, p2, next_predict
+    return last_result, banker, player, suggestion
 
 # === LINE Message 處理 ===
 @handler.add(MessageEvent, message=ImageMessage)
@@ -95,21 +79,52 @@ def handle_image(event):
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
 
     # 執行預測
-    last_result, banker, player, suggestion, b2, p2, next_predict = analyze_and_predict(image_path, user_id)
+    last_result, banker, player, suggestion = analyze_and_predict(image_path, user_id)
 
     reply = (
         f"📸 圖像辨識完成\n\n"
         f"🔙 上一顆開：{last_result}\n"
         f"🔴 莊勝率：{banker}%\n"
-        f"🔵 閒勝率：{player}%\n"
+        f"🔵 閒勝率：{player}%\n\n"
         f"📈 AI 推論下一顆：{suggestion}\n\n"
-        f"⏭️ AI 推論再下一顆：{next_predict}\n"
-        f"🔴 莊勝率：{b2}%\n"
-        f"🔵 閒勝率：{p2}%"
+        f"請回覆『莊』或『閒』以紀錄實際結果，並啟動下一輪預測。"
     )
 
     line_bot_api.push_message(user_id, TextSendMessage(text=reply))
 
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text(event):
+    user_id = event.source.user_id
+    msg = event.message.text.strip()
+    if msg in ["莊", "閒"]:
+        # 紀錄實際結果
+        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
+
+        # 查詢最近 10 筆資料再預測
+        history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
+        records = [r["result"] for r in reversed(history.data)]
+
+        if len(records) < 10:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 紀錄完成 ✅ 但資料不足，請繼續操作後再預測。"))
+            return
+
+        feature = [1 if r == "莊" else 0 for r in records]
+        pred = model.predict_proba([feature])[0]
+        banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
+        suggestion = "莊" if pred[1] >= pred[0] else "閒"
+
+        reply = (
+            f"✅ 已紀錄：{msg}\n\n"
+            f"📊 AI 推論下一顆：{suggestion}\n"
+            f"🔴 莊勝率：{banker}%\n"
+            f"🔵 閒勝率：{player}%"
+        )
+
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    else:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入『莊』或『閒』以進行下一顆預測。"))
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
