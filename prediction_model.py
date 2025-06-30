@@ -9,7 +9,6 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageMessage
 import joblib
-from prediction_model import analyze_and_predict
 
 app = Flask(__name__)
 
