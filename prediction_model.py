@@ -9,7 +9,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # 載入訓練好的模型
-MODEL_PATH = "/mnt/data/baccarat_model.pkl"
+MODEL_PATH = "baccarat_model.pkl"
 model = joblib.load(MODEL_PATH)
 
 
