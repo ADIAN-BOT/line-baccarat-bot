@@ -116,19 +116,25 @@ def handle_message(event):
             for chunk in content.iter_content():
                 f.write(chunk)
 
+        # 先回覆接收成功，避免 token 失效
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
+
         banker, player, suggestion = analyze_and_predict(img_path, line_user_id)
 
-        if suggestion.startswith("無法"):
-            reply = suggestion
-        else:
-            reply = (
-                f"📸 圖像辨識完成\n\n"
-                f"🔴 莊勝率：{banker}%\n"
-                f"🔵 閒勝率：{player}%\n\n"
-                f"📈 建議下注：{suggestion}"
-            )
+        # 查詢最新一筆結果（即上一顆開莊還是閒）
+        latest = supabase.table("records").select("result").eq("line_user_id", line_user_id).order("id", desc=True).limit(1).execute()
+        last_result = latest.data[0]['result'] if latest.data else "無紀錄"
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        result_msg = (
+            f"📸 圖像辨識完成\n\n"
+            f"🔙 上一顆開：{last_result}\n"
+            f"🔴 莊勝率：{banker}%\n"
+            f"🔵 閒勝率：{player}%\n\n"
+            f"📈 建議下注：{suggestion}"
+        )
+
+        # 使用 push_message 傳送預測結果
+        line_bot_api.push_message(line_user_id, TextSendMessage(text=result_msg))
 
 if __name__ == "__main__":
     # 首次部署時打開這行設定 Rich Menu
