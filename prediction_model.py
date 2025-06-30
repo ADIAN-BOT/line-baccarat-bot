@@ -1,62 +1,45 @@
+import os
+import tempfile
+import requests
 import cv2
 import numpy as np
-import os
-import joblib
+from flask import Flask, request, abort
 from supabase import create_client, Client
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageMessage
+import joblib
+import random
 
+# === 載入模型 ===
+model = joblib.load("baccarat_model.pkl")
+
+# === 初始化 Supabase ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# 載入模型
-MODEL_PATH = "baccarat_model.pkl"
-model = joblib.load(MODEL_PATH)
+def analyze_and_predict(image_path, user_id):
+    # 圖像處理與辨識（這裡可替換為你的 OCR 大路圖解析邏輯）
+    # 模擬從圖片預測出『上一顆』結果（真實應改為影像分析）
+    last_result = random.choice(["莊", "閒"])
 
-def detect_circles_by_color(img, lower, upper, label):
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, lower, upper)
-    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    results = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if 50 < area < 1500:
-            M = cv2.moments(cnt)
-            if M['m00'] != 0:
-                cx = int(M['m10']/M['m00'])
-                cy = int(M['m01']/M['m00'])
-                results.append((cx, cy, label))
-    return results
+    # 將上一顆結果寫入資料庫
+    supabase.table("records").insert({"line_user_id": user_id, "result": last_result}).execute()
 
-def analyze_and_predict(img_path, line_user_id):
-    img = cv2.imread(img_path)
-    if img is None:
-        return 50.0, 50.0, "無法分析：圖片讀取失敗"
+    # 取得最近10筆記錄
+    history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
+    records = [r["result"] for r in reversed(history.data)]
 
-    red1 = ((0, 70, 50), (10, 255, 255))
-    red2 = ((170, 70, 50), (180, 255, 255))
-    blue = ((100, 100, 100), (130, 255, 255))
+    if len(records) < 10:
+        return last_result, 0.0, 0.0, "無法預測，紀錄不足。"
 
-    results = []
-    results += detect_circles_by_color(img, *red1, label="莊")
-    results += detect_circles_by_color(img, *red2, label="莊")
-    results += detect_circles_by_color(img, *blue, label="閒")
+    # 特徵轉換與模型預測
+    feature = [1 if r == "莊" else 0 for r in records]
+    pred = model.predict_proba([feature])[0]
+    banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
+    suggestion = "莊" if pred[1] >= pred[0] else "閒"
 
-    results.sort(key=lambda x: (x[0], x[1]))
-    sequence = [r[2] for r in results if r[2] in ["莊", "閒"]][-10:]
-
-    for r in sequence:
-        supabase.table("records").insert({"line_user_id": line_user_id, "result": r}).execute()
-
-    if len(sequence) < 10:
-        return 50.0, 50.0, "無法分析（資料不足）"
-
-    feature = [1 if r == "莊" else 0 for r in sequence]
-    input_data = np.array(feature).reshape(1, -1)
-    pred_proba = model.predict_proba(input_data)[0]
-    banker_rate = round(pred_proba[1] * 100, 1)
-    player_rate = round(pred_proba[0] * 100, 1)
-    recommend = "莊" if pred_proba[1] >= pred_proba[0] else "閒"
-
-    return banker_rate, player_rate, recommend
+    return last_result, banker, player, suggestion
 
 
