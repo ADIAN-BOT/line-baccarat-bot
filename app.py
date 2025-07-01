@@ -58,8 +58,8 @@ def get_or_create_user(user_id):
     supabase.table("members").insert(new_user).execute()
     return new_user
 
-# === 圖像分析辨識最後一顆莊或閒 ===
-def detect_last_result(image_path):
+# === 圖像分析辨識前 N 顆莊或閒 ===
+def detect_last_n_results(image_path, n=10):
     img = cv2.imread(image_path)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     lower_red1 = np.array([0, 100, 100])
@@ -71,27 +71,24 @@ def detect_last_result(image_path):
     upper_blue = np.array([130, 255, 255])
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
     contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    red_circles = [cv2.boundingRect(cnt) for cnt in contours_red if cv2.contourArea(cnt) > 100]
+    red_circles = [(cv2.boundingRect(cnt), '莊') for cnt in contours_red if cv2.contourArea(cnt) > 100]
     contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    blue_circles = [cv2.boundingRect(cnt) for cnt in contours_blue if cv2.contourArea(cnt) > 100]
-    if not red_circles and not blue_circles:
-        return None
-    all_circles = [(x+w, '莊') for (x, y, w, h) in red_circles] + [(x+w, '閒') for (x, y, w, h) in blue_circles]
-    last = sorted(all_circles, key=lambda t: -t[0])[0][1]
-    return last
+    blue_circles = [(cv2.boundingRect(cnt), '閒') for cnt in contours_blue if cv2.contourArea(cnt) > 100]
+    all_circles = [(x+w, res) for ((x, y, w, h), res) in red_circles + blue_circles]
+    sorted_results = [r for _, r in sorted(all_circles, key=lambda t: -t[0])]
+    return sorted_results[:n]
 
-# === 圖像分析與預測邏輯 ===
-def analyze_and_predict(user_id):
-    history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
-    records = [r["result"] for r in reversed(history.data)]
-    if len(records) < 10:
-        return "無", 0.0, 0.0, "紀錄不足，請先多上傳幾張圖片建立預測紀錄"
-    feature = [1 if r == "莊" else 0 for r in records]
+# === 圖像分析與預測邏輯（直接使用偵測結果） ===
+def predict_from_recent_results(results):
+    if not results:
+        return "無", 0.0, 0.0, "無法判斷"
+    feature = [1 if r == "莊" else 0 for r in reversed(results)]
+    while len(feature) < 10:
+        feature.insert(0, 1 if random.random() > 0.5 else 0)
     pred = model.predict_proba([feature])[0]
     banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
     suggestion = "莊" if pred[1] >= pred[0] else "閒"
-    last_result = records[-1]
-    return last_result, banker, player, suggestion
+    return results[0], banker, player, suggestion
 
 # === 快速回覆按鈕 ===
 def get_quick_reply():
@@ -172,9 +169,10 @@ def handle_message(event):
         if user.get("await_continue", False):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 請先輸入『繼續分析』以進行下一步預測。", quick_reply=get_quick_reply()))
             return
-
         supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
-        last_result, banker, player, suggestion = analyze_and_predict(user_id)
+        history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
+        results = [r["result"] for r in reversed(history.data)]
+        last_result, banker, player, suggestion = predict_from_recent_results(results)
         reply = (
             f"✅ 已記錄：{msg}\n\n"
             f"🔴 莊勝率：{banker}%\n"
@@ -193,35 +191,27 @@ def handle_message(event):
             ))
             return
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後...", quick_reply=get_quick_reply()))
-
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
         message_id = event.message.id
         image_path = f"/tmp/{message_id}.jpg"
         content = line_bot_api.get_message_content(message_id)
         with open(image_path, "wb") as f:
             for chunk in content.iter_content():
                 f.write(chunk)
-
-        detected = detect_last_result(image_path)
-        if detected in ["莊", "閒"]:
-            supabase.table("records").insert({"line_user_id": user_id, "result": detected}).execute()
-        else:
+        results = detect_last_n_results(image_path)
+        if not results:
             line_bot_api.push_message(user_id, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。", quick_reply=get_quick_reply()))
             return
-
-        last_result, banker, player, suggestion = analyze_and_predict(user_id)
-
-        if suggestion.startswith("紀錄不足"):
-            reply = "📸 圖像辨識完成\n⚠️ AI 無法預測，紀錄不足。"
-        else:
-            reply = (
-                f"📸 圖像辨識完成\n\n"
-                f"🔙 上一顆開：{last_result}\n"
-                f"🔴 莊勝率：{banker}%\n"
-                f"🔵 閒勝率：{player}%\n\n"
-                f"📈 AI 推論下一顆：{suggestion}"
-            )
-
+        for r in results:
+            supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
+        last_result, banker, player, suggestion = predict_from_recent_results(results)
+        reply = (
+            f"📸 圖像辨識完成\n\n"
+            f"🔙 最後一顆：{last_result}\n"
+            f"🔴 莊勝率：{banker}%\n"
+            f"🔵 閒勝率：{player}%\n\n"
+            f"📈 AI 推論下一顆：{suggestion}"
+        )
         line_bot_api.push_message(user_id, TextSendMessage(text=reply, quick_reply=get_quick_reply()))
         supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
         return
