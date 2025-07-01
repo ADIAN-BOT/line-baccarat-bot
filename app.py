@@ -51,7 +51,7 @@ def get_or_create_user(user_id):
         "line_user_id": user_id,
         "user_code": user_code,
         "is_authorized": False,
-        "prediction_active": True
+        "prediction_active": False
     }
     supabase.table("members").insert(new_user).execute()
     return new_user
@@ -121,6 +121,17 @@ def handle_message(event):
             text="🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。"
         ))
 
+    elif msg in ["莊", "閒"]:
+        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
+        last_result, banker, player, suggestion = analyze_and_predict(user_id)
+        reply = (
+            f"✅ 已記錄：{msg}\n\n"
+            f"🔴 莊勝率：{banker}%\n"
+            f"🔵 閒勝率：{player}%\n"
+            f"📈 AI 推論下一顆：{suggestion}"
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
     elif isinstance(event.message, ImageMessage):
         if not user.get("prediction_active", False):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(
@@ -135,13 +146,11 @@ def handle_message(event):
             for chunk in content.iter_content():
                 f.write(chunk)
 
-        line_bot_api.push_message(user_id, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
-
         detected = detect_last_result(image_path)
         if detected in ["莊", "閒"]:
             supabase.table("records").insert({"line_user_id": user_id, "result": detected}).execute()
         else:
-            line_bot_api.push_message(user_id, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。"))
             return
 
         last_result, banker, player, suggestion = analyze_and_predict(user_id)
@@ -157,11 +166,7 @@ def handle_message(event):
                 f"📈 AI 推論下一顆：{suggestion}"
             )
 
-        line_bot_api.push_message(user_id, TextSendMessage(text=reply))
-
-    elif msg in ["莊", "閒"]:
-        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已記錄：{msg}"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
     else:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確指令或上傳圖片進行預測。"))
