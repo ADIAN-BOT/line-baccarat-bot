@@ -56,19 +56,37 @@ def get_or_create_user(user_id):
     supabase.table("members").insert(new_user).execute()
     return new_user
 
-# === 圖像分析辨識莊或閒 ===
+# === 改良版：圖像分析辨識最後一顆莊或閒 ===
 def detect_last_result(image_path):
     img = cv2.imread(image_path)
-    h, w = img.shape[:2]
-    roi = img[h-50:h, w-100:w]  # 擷取右下角格子範圍
-    avg_color = cv2.mean(roi)[:3]
-    r, g, b = avg_color
-    if r > 150 and b < 100:
-        return "莊"
-    elif b > 150 and r < 100:
-        return "閒"
-    else:
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    # 紅色範圍（兩段式紅）
+    lower_red1 = np.array([0, 100, 100])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([160, 100, 100])
+    upper_red2 = np.array([179, 255, 255])
+    mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
+
+    # 藍色範圍
+    lower_blue = np.array([100, 100, 100])
+    upper_blue = np.array([130, 255, 255])
+    mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
+
+    # 找紅色圓圈
+    contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    red_circles = [cv2.boundingRect(cnt) for cnt in contours_red if cv2.contourArea(cnt) > 100]
+
+    # 找藍色圓圈
+    contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    blue_circles = [cv2.boundingRect(cnt) for cnt in contours_blue if cv2.contourArea(cnt) > 100]
+
+    if not red_circles and not blue_circles:
         return None
+
+    all_circles = [(x+w, '莊') for (x, y, w, h) in red_circles] + [(x+w, '閒') for (x, y, w, h) in blue_circles]
+    last = sorted(all_circles, key=lambda t: -t[0])[0][1]
+    return last
 
 # === 圖像分析與預測邏輯 ===
 def analyze_and_predict(user_id):
@@ -173,4 +191,3 @@ def handle_message(event):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
