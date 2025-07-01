@@ -41,15 +41,24 @@ def callback():
         abort(400)
     return 'OK'
 
-# === 圖像分析與預測邏輯 ===
+# === 建立用戶資料 ===
+def get_or_create_user(user_id):
+    res = supabase.table("members").select("*").eq("line_user_id", user_id).execute()
+    if res.data:
+        return res.data[0]
+    user_code = str(uuid.uuid4())
+    new_user = {
+        "line_user_id": user_id,
+        "user_code": user_code,
+        "is_authorized": False
+    }
+    supabase.table("members").insert(new_user).execute()
+    return new_user
+
+# === 預測核心 ===
 def analyze_and_predict(image_path, user_id):
-    # 模擬圖像辨識結果（此處可整合 OCR 進行自動識別）
     last_result = random.choice(["莊", "閒"])
-
-    # 寫入上一顆結果
     supabase.table("records").insert({"line_user_id": user_id, "result": last_result}).execute()
-
-    # 取得最近 10 顆紀錄
     history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
     records = [r["result"] for r in reversed(history.data)]
 
@@ -60,71 +69,87 @@ def analyze_and_predict(image_path, user_id):
     pred = model.predict_proba([feature])[0]
     banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
     suggestion = "莊" if pred[1] >= pred[0] else "閒"
-
     return last_result, banker, player, suggestion
 
-# === LINE Message 處理 ===
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
+# === 處理使用者訊息 ===
+@handler.add(MessageEvent, message=(TextMessage, ImageMessage))
+def handle_message(event):
     user_id = event.source.user_id
-    message_id = event.message.id
-    image_path = f"/tmp/{message_id}.jpg"
+    user = get_or_create_user(user_id)
 
-    content = line_bot_api.get_message_content(message_id)
-    with open(image_path, "wb") as f:
-        for chunk in content.iter_content():
-            f.write(chunk)
+    if not user['is_authorized']:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=(
+                "🔒 尚未授權，請將以下 UID 提供給管理員開通：\n"
+                f"🆔 {user['user_code']}\n"
+                "📩 聯絡管理員：https://lin.ee/2ODINSW"
+            ))
+        )
+        return
 
-    # 初步回應
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
+    msg = event.message.text if isinstance(event.message, TextMessage) else None
 
-    # 執行預測
-    last_result, banker, player, suggestion = analyze_and_predict(image_path, user_id)
+    if msg == "開始預測":
+        reply = (
+            "請先上傳房間資訊 📝\n"
+            "成功後將顯示：\n"
+            "房間數據分析成功✔\nAI模型已建立初步判斷\n\n"
+            "1.輸入最新開獎結果(莊或閒)\n"
+            "2.接著輸入「繼續預測」開始預測下一局\n\n"
+            "若換房或結束，請先輸入停止預測再重新上傳新的房間資訊"
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-    reply = (
-        f"📸 圖像辨識完成\n\n"
-        f"🔙 上一顆開：{last_result}\n"
-        f"🔴 莊勝率：{banker}%\n"
-        f"🔵 閒勝率：{player}%\n\n"
-        f"📈 AI 推論下一顆：{suggestion}\n\n"
-        f"請回覆『莊』或『閒』以紀錄實際結果，並啟動下一輪預測。"
-    )
+    elif msg == "停止預測":
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已停止預測，請重新上傳房間資訊以繼續。"))
 
-    line_bot_api.push_message(user_id, TextSendMessage(text=reply))
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text(event):
-    user_id = event.source.user_id
-    msg = event.message.text.strip()
-    if msg in ["莊", "閒"]:
-        # 紀錄實際結果
-        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
-
-        # 查詢最近 10 筆資料再預測
+    elif msg == "繼續預測":
         history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
         records = [r["result"] for r in reversed(history.data)]
-
         if len(records) < 10:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 紀錄完成 ✅ 但資料不足，請繼續操作後再預測。"))
-            return
+            reply = "請輸入『莊』或『閒』以進行下一顆預測。"
+        else:
+            feature = [1 if r == "莊" else 0 for r in records]
+            pred = model.predict_proba([feature])[0]
+            banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
+            suggestion = "莊" if pred[1] >= pred[0] else "閒"
+            reply = (
+                f"🔴 莊勝率：{banker}%\n"
+                f"🔵 閒勝率：{player}%\n"
+                f"📈 AI 推論下一顆：{suggestion}"
+            )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-        feature = [1 if r == "莊" else 0 for r in records]
-        pred = model.predict_proba([feature])[0]
-        banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
-        suggestion = "莊" if pred[1] >= pred[0] else "閒"
+    elif msg in ["莊", "閒"]:
+        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已記錄：{msg}"))
+
+    elif isinstance(event.message, ImageMessage):
+        message_id = event.message.id
+        image_path = f"/tmp/{message_id}.jpg"
+        content = line_bot_api.get_message_content(message_id)
+        with open(image_path, "wb") as f:
+            for chunk in content.iter_content():
+                f.write(chunk)
+
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
+
+        last_result, banker, player, suggestion = analyze_and_predict(image_path, user_id)
 
         reply = (
-            f"✅ 已紀錄：{msg}\n\n"
-            f"📊 AI 推論下一顆：{suggestion}\n"
+            f"📸 圖像辨識完成\n\n"
+            f"🔙 上一顆開：{last_result}\n"
             f"🔴 莊勝率：{banker}%\n"
-            f"🔵 閒勝率：{player}%"
+            f"🔵 閒勝率：{player}%\n\n"
+            f"📈 AI 推論下一顆：{suggestion}"
         )
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        line_bot_api.push_message(user_id, TextSendMessage(text=reply))
+
     else:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入『莊』或『閒』以進行下一顆預測。"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確指令或上傳圖片進行預測。"))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
 
