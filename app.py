@@ -136,7 +136,8 @@ def handle_message(event):
             for chunk in content.iter_content():
                 f.write(chunk)
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
+        # 改用 push_message 避免 reply token 錯誤
+        line_bot_api.push_message(user_id, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
 
         last_result, banker, player, suggestion = analyze_and_predict(image_path, user_id)
 
