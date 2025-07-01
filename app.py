@@ -9,7 +9,8 @@ from supabase import create_client, Client
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage, ImageMessage
+    MessageEvent, TextMessage, TextSendMessage, ImageMessage,
+    QuickReply, QuickReplyButton, MessageAction
 )
 import joblib
 import random
@@ -57,7 +58,7 @@ def get_or_create_user(user_id):
     supabase.table("members").insert(new_user).execute()
     return new_user
 
-# === 改良版：圖像分析辨識最後一顆莊或閒 ===
+# === 圖像分析辨識最後一顆莊或閒 ===
 def detect_last_result(image_path):
     img = cv2.imread(image_path)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -92,99 +93,57 @@ def analyze_and_predict(user_id):
     last_result = records[-1]
     return last_result, banker, player, suggestion
 
+# === 快速回覆按鈕 ===
+def get_quick_reply():
+    return QuickReply(items=[
+        QuickReplyButton(action=MessageAction(label="🔍 開始預測", text="開始預測")),
+        QuickReplyButton(action=MessageAction(label="🔴 莊", text="莊")),
+        QuickReplyButton(action=MessageAction(label="🔵 閒", text="閒")),
+        QuickReplyButton(action=MessageAction(label="▶️ 繼續分析", text="繼續分析")),
+        QuickReplyButton(action=MessageAction(label="⛔ 停止預測", text="停止分析")),
+        QuickReplyButton(action=MessageAction(label="📘 使用說明", text="使用說明")),
+        QuickReplyButton(action=MessageAction(label="🔗 註冊網址", text="註冊網址")),
+    ])
+
+# === LINE Message 處理 ===
 @handler.add(MessageEvent, message=(TextMessage, ImageMessage))
 def handle_message(event):
     user_id = event.source.user_id
     user = get_or_create_user(user_id)
-
-    if not user['is_authorized']:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=(
-            "🔒 尚未授權，請將以下 UID 提供給管理員開通：\n"
-            f"🆔 {user['user_code']}\n"
-            "📩 聯絡管理員：https://lin.ee/2ODINSW"
-        )))
-        return
-
     msg = event.message.text if isinstance(event.message, TextMessage) else None
 
-    if msg == "開始預測":
-        supabase.table("members").update({"prediction_active": True, "await_continue": False}).eq("line_user_id", user_id).execute()
-        reply = (
-            "請先上傳房間資訊 📝\n"
-            "成功後將顯示：\n"
-            "房間數據分析成功✔\nAI模型已建立初步判斷\n\n"
-            "後續每次上傳圖片將自動辨識並進行預測。\n"
-            "若換房或結束，請輸入『停止分析』再重新上傳新的房間圖。"
-        )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
-    elif msg == "停止分析":
-        supabase.table("members").update({"prediction_active": False, "await_continue": False}).eq("line_user_id", user_id).execute()
+    if not user['is_authorized']:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(
-            text="🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。"
+            text=(
+                "🔒 尚未授權，請將以下 UID 提供給管理員開通：\n"
+                f"🆔 {user['user_code']}\n"
+                "📩 聯絡管理員：https://lin.ee/2ODINSW"
+            ),
+            quick_reply=get_quick_reply()
         ))
+        return
 
-    elif msg == "繼續分析":
-        supabase.table("members").update({"await_continue": False}).eq("line_user_id", user_id).execute()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ AI 已繼續分析，請輸入『莊』或『閒』以進行下一筆預測。"))
-
-    elif msg in ["莊", "閒"]:
-        if user.get("await_continue", False):
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 請先輸入『繼續分析』以進行下一步預測。"))
-            return
-
-        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
-        last_result, banker, player, suggestion = analyze_and_predict(user_id)
-        reply = (
-            f"✅ 已記錄：{msg}\n\n"
-            f"🔴 莊勝率：{banker}%\n"
-            f"🔵 閒勝率：{player}%\n"
-            f"📈 AI 推論下一顆：{suggestion}"
+    if msg == "使用說明":
+        usage = (
+            "📘 使用說明：\n\n"
+            "1️⃣ 開始預測前請先複製 UID 給客服人員\n"
+            "2️⃣ 開通後即可開始操作，操作步驟如下：\n"
+            "🔹 上傳你所在房間的大路圖表格\n"
+            "🔹 圖片分析成功後，會自動回傳上一顆是莊或閒\n"
+            "🔹 回傳結果後，請點『繼續分析』再進行下一步預測\n"
+            "🔹 換房或結束後，請點『停止分析』關閉分析功能"
         )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-        supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=usage, quick_reply=get_quick_reply()))
+        return
 
-    elif isinstance(event.message, ImageMessage):
-        if not user.get("prediction_active", False):
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="⚠️ 預測尚未啟動，請先輸入『開始預測』以啟用分析。"
-            ))
-            return
+    if msg == "註冊網址":
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(
+            text="🔗 點擊進入註冊頁面：https://wek001.welove777.com",
+            quick_reply=get_quick_reply()
+        ))
+        return
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
-
-        message_id = event.message.id
-        image_path = f"/tmp/{message_id}.jpg"
-        content = line_bot_api.get_message_content(message_id)
-        with open(image_path, "wb") as f:
-            for chunk in content.iter_content():
-                f.write(chunk)
-
-        detected = detect_last_result(image_path)
-        if detected in ["莊", "閒"]:
-            supabase.table("records").insert({"line_user_id": user_id, "result": detected}).execute()
-        else:
-            line_bot_api.push_message(user_id, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。"))
-            return
-
-        last_result, banker, player, suggestion = analyze_and_predict(user_id)
-
-        if suggestion.startswith("紀錄不足"):
-            reply = "📸 圖像辨識完成\n⚠️ AI 無法預測，紀錄不足。"
-        else:
-            reply = (
-                f"📸 圖像辨識完成\n\n"
-                f"🔙 上一顆開：{last_result}\n"
-                f"🔴 莊勝率：{banker}%\n"
-                f"🔵 閒勝率：{player}%\n\n"
-                f"📈 AI 推論下一顆：{suggestion}"
-            )
-
-        line_bot_api.push_message(user_id, TextSendMessage(text=reply))
-        supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
-
-    else:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確指令或上傳圖片進行預測。"))
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請選擇操作功能 👇", quick_reply=get_quick_reply()))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
