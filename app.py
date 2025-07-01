@@ -50,18 +50,33 @@ def get_or_create_user(user_id):
     new_user = {
         "line_user_id": user_id,
         "user_code": user_code,
-        "is_authorized": False
+        "is_authorized": False,
+        "prediction_active": True
     }
     supabase.table("members").insert(new_user).execute()
     return new_user
 
+# === 圖像分析辨識莊或閒 ===
+def detect_last_result(image_path):
+    img = cv2.imread(image_path)
+    h, w = img.shape[:2]
+    roi = img[h-50:h, w-100:w]  # 擷取右下角格子範圍
+    avg_color = cv2.mean(roi)[:3]
+    r, g, b = avg_color
+    if r > 150 and b < 100:
+        return "莊"
+    elif b > 150 and r < 100:
+        return "閒"
+    else:
+        return None
+
 # === 圖像分析與預測邏輯 ===
-def analyze_and_predict(image_path, user_id):
+def analyze_and_predict(user_id):
     history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
     records = [r["result"] for r in reversed(history.data)]
 
     if len(records) < 10:
-        return "無", 0.0, 0.0, "紀錄不足，請先輸入幾顆開獎結果（莊或閒）"
+        return "無", 0.0, 0.0, "紀錄不足，請先多上傳幾張圖片建立預測紀錄"
 
     feature = [1 if r == "莊" else 0 for r in records]
     pred = model.predict_proba([feature])[0]
@@ -90,42 +105,29 @@ def handle_message(event):
     msg = event.message.text if isinstance(event.message, TextMessage) else None
 
     if msg == "開始預測":
+        supabase.table("members").update({"prediction_active": True}).eq("line_user_id", user_id).execute()
         reply = (
             "請先上傳房間資訊 📝\n"
             "成功後將顯示：\n"
             "房間數據分析成功✔\nAI模型已建立初步判斷\n\n"
-            "1.輸入最新開獎結果(莊或閒)\n"
-            "2.接著輸入「繼續預測」開始預測下一局\n\n"
-            "若換房或結束，請先輸入停止預測再重新上傳新的房間資訊"
+            "後續每次上傳圖片將自動辨識並進行預測。\n"
+            "若換房或結束，請輸入『停止分析』再重新上傳新的房間圖。"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-    elif msg == "停止預測":
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 已停止預測，請重新上傳房間資訊以繼續。"))
-
-    elif msg == "繼續預測":
-        history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
-        records = [r["result"] for r in reversed(history.data)]
-
-        if len(records) < 10:
-            reply = "請先輸入至少 10 顆開獎結果（莊或閒）再試一次。"
-        else:
-            feature = [1 if r == "莊" else 0 for r in records]
-            pred = model.predict_proba([feature])[0]
-            banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
-            suggestion = "莊" if pred[1] >= pred[0] else "閒"
-            reply = (
-                f"🔴 莊勝率：{banker}%\n"
-                f"🔵 閒勝率：{player}%\n"
-                f"📈 AI 推論下一顆：{suggestion}"
-            )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
-    elif msg in ["莊", "閒"]:
-        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已記錄：{msg}"))
+    elif msg == "停止分析":
+        supabase.table("members").update({"prediction_active": False}).eq("line_user_id", user_id).execute()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(
+            text="🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。"
+        ))
 
     elif isinstance(event.message, ImageMessage):
+        if not user.get("prediction_active", False):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                text="⚠️ 預測尚未啟動，請先輸入『開始預測』以啟用分析。"
+            ))
+            return
+
         message_id = event.message.id
         image_path = f"/tmp/{message_id}.jpg"
         content = line_bot_api.get_message_content(message_id)
@@ -135,10 +137,17 @@ def handle_message(event):
 
         line_bot_api.push_message(user_id, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
 
-        last_result, banker, player, suggestion = analyze_and_predict(image_path, user_id)
+        detected = detect_last_result(image_path)
+        if detected in ["莊", "閒"]:
+            supabase.table("records").insert({"line_user_id": user_id, "result": detected}).execute()
+        else:
+            line_bot_api.push_message(user_id, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。"))
+            return
 
-        if suggestion == "紀錄不足，請先輸入幾顆開獎結果（莊或閒）":
-            reply = "📸 圖像辨識完成\n⚠️ AI 無法預測，紀錄不足。\n請先輸入至少 10 顆開獎結果（莊或閒）再試一次。"
+        last_result, banker, player, suggestion = analyze_and_predict(user_id)
+
+        if suggestion.startswith("紀錄不足"):
+            reply = "📸 圖像辨識完成\n⚠️ AI 無法預測，紀錄不足。"
         else:
             reply = (
                 f"📸 圖像辨識完成\n\n"
@@ -150,8 +159,13 @@ def handle_message(event):
 
         line_bot_api.push_message(user_id, TextSendMessage(text=reply))
 
+    elif msg in ["莊", "閒"]:
+        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已記錄：{msg}"))
+
     else:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確指令或上傳圖片進行預測。"))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
