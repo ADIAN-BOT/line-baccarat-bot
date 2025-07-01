@@ -51,7 +51,8 @@ def get_or_create_user(user_id):
         "line_user_id": user_id,
         "user_code": user_code,
         "is_authorized": False,
-        "prediction_active": False
+        "prediction_active": False,
+        "await_continue": False
     }
     supabase.table("members").insert(new_user).execute()
     return new_user
@@ -60,30 +61,20 @@ def get_or_create_user(user_id):
 def detect_last_result(image_path):
     img = cv2.imread(image_path)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-    # 紅色範圍（兩段式紅）
     lower_red1 = np.array([0, 100, 100])
     upper_red1 = np.array([10, 255, 255])
     lower_red2 = np.array([160, 100, 100])
     upper_red2 = np.array([179, 255, 255])
     mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
-
-    # 藍色範圍
     lower_blue = np.array([100, 100, 100])
     upper_blue = np.array([130, 255, 255])
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
-
-    # 找紅色圓圈
     contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     red_circles = [cv2.boundingRect(cnt) for cnt in contours_red if cv2.contourArea(cnt) > 100]
-
-    # 找藍色圓圈
     contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     blue_circles = [cv2.boundingRect(cnt) for cnt in contours_blue if cv2.contourArea(cnt) > 100]
-
     if not red_circles and not blue_circles:
         return None
-
     all_circles = [(x+w, '莊') for (x, y, w, h) in red_circles] + [(x+w, '閒') for (x, y, w, h) in blue_circles]
     last = sorted(all_circles, key=lambda t: -t[0])[0][1]
     return last
@@ -92,10 +83,8 @@ def detect_last_result(image_path):
 def analyze_and_predict(user_id):
     history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
     records = [r["result"] for r in reversed(history.data)]
-
     if len(records) < 10:
         return "無", 0.0, 0.0, "紀錄不足，請先多上傳幾張圖片建立預測紀錄"
-
     feature = [1 if r == "莊" else 0 for r in records]
     pred = model.predict_proba([feature])[0]
     banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
@@ -103,27 +92,23 @@ def analyze_and_predict(user_id):
     last_result = records[-1]
     return last_result, banker, player, suggestion
 
-# === LINE Message 處理 ===
 @handler.add(MessageEvent, message=(TextMessage, ImageMessage))
 def handle_message(event):
     user_id = event.source.user_id
     user = get_or_create_user(user_id)
 
     if not user['is_authorized']:
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=(
-                "🔒 尚未授權，請將以下 UID 提供給管理員開通：\n"
-                f"🆔 {user['user_code']}\n"
-                "📩 聯絡管理員：https://lin.ee/2ODINSW"
-            ))
-        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=(
+            "🔒 尚未授權，請將以下 UID 提供給管理員開通：\n"
+            f"🆔 {user['user_code']}\n"
+            "📩 聯絡管理員：https://lin.ee/2ODINSW"
+        )))
         return
 
     msg = event.message.text if isinstance(event.message, TextMessage) else None
 
     if msg == "開始預測":
-        supabase.table("members").update({"prediction_active": True}).eq("line_user_id", user_id).execute()
+        supabase.table("members").update({"prediction_active": True, "await_continue": False}).eq("line_user_id", user_id).execute()
         reply = (
             "請先上傳房間資訊 📝\n"
             "成功後將顯示：\n"
@@ -134,12 +119,20 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
     elif msg == "停止分析":
-        supabase.table("members").update({"prediction_active": False}).eq("line_user_id", user_id).execute()
+        supabase.table("members").update({"prediction_active": False, "await_continue": False}).eq("line_user_id", user_id).execute()
         line_bot_api.reply_message(event.reply_token, TextSendMessage(
             text="🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。"
         ))
 
+    elif msg == "繼續分析":
+        supabase.table("members").update({"await_continue": False}).eq("line_user_id", user_id).execute()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ AI 已繼續分析，請輸入『莊』或『閒』以進行下一筆預測。"))
+
     elif msg in ["莊", "閒"]:
+        if user.get("await_continue", False):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 請先輸入『繼續分析』以進行下一步預測。"))
+            return
+
         supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
         last_result, banker, player, suggestion = analyze_and_predict(user_id)
         reply = (
@@ -149,6 +142,7 @@ def handle_message(event):
             f"📈 AI 推論下一顆：{suggestion}"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
 
     elif isinstance(event.message, ImageMessage):
         if not user.get("prediction_active", False):
@@ -156,6 +150,8 @@ def handle_message(event):
                 text="⚠️ 預測尚未啟動，請先輸入『開始預測』以啟用分析。"
             ))
             return
+
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
 
         message_id = event.message.id
         image_path = f"/tmp/{message_id}.jpg"
@@ -168,7 +164,7 @@ def handle_message(event):
         if detected in ["莊", "閒"]:
             supabase.table("records").insert({"line_user_id": user_id, "result": detected}).execute()
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。"))
+            line_bot_api.push_message(user_id, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。"))
             return
 
         last_result, banker, player, suggestion = analyze_and_predict(user_id)
@@ -184,10 +180,12 @@ def handle_message(event):
                 f"📈 AI 推論下一顆：{suggestion}"
             )
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        line_bot_api.push_message(user_id, TextSendMessage(text=reply))
+        supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
 
     else:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入正確指令或上傳圖片進行預測。"))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
