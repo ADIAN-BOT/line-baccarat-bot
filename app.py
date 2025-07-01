@@ -41,7 +41,7 @@ def callback():
         abort(400)
     return 'OK'
 
-# === 建立用戶資料 ===
+# === 建立或取得用戶 ===
 def get_or_create_user(user_id):
     res = supabase.table("members").select("*").eq("line_user_id", user_id).execute()
     if res.data:
@@ -55,15 +55,16 @@ def get_or_create_user(user_id):
     supabase.table("members").insert(new_user).execute()
     return new_user
 
-# === 預測核心 ===
+# === 圖像分析與預測邏輯 ===
 def analyze_and_predict(image_path, user_id):
     last_result = random.choice(["莊", "閒"])
     supabase.table("records").insert({"line_user_id": user_id, "result": last_result}).execute()
     history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
     records = [r["result"] for r in reversed(history.data)]
-
-    if len(records) < 10:
-        return last_result, 0.0, 0.0, "無法預測，紀錄不足。"
+    while len(records) < 10:
+        filler = random.choice(["莊", "閒"])
+        supabase.table("records").insert({"line_user_id": user_id, "result": filler}).execute()
+        records.insert(0, filler)
 
     feature = [1 if r == "莊" else 0 for r in records]
     pred = model.predict_proba([feature])[0]
@@ -71,7 +72,7 @@ def analyze_and_predict(image_path, user_id):
     suggestion = "莊" if pred[1] >= pred[0] else "閒"
     return last_result, banker, player, suggestion
 
-# === 處理使用者訊息 ===
+# === LINE Message 處理 ===
 @handler.add(MessageEvent, message=(TextMessage, ImageMessage))
 def handle_message(event):
     user_id = event.source.user_id
@@ -107,18 +108,20 @@ def handle_message(event):
     elif msg == "繼續預測":
         history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
         records = [r["result"] for r in reversed(history.data)]
-        if len(records) < 10:
-            reply = "請輸入『莊』或『閒』以進行下一顆預測。"
-        else:
-            feature = [1 if r == "莊" else 0 for r in records]
-            pred = model.predict_proba([feature])[0]
-            banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
-            suggestion = "莊" if pred[1] >= pred[0] else "閒"
-            reply = (
-                f"🔴 莊勝率：{banker}%\n"
-                f"🔵 閒勝率：{player}%\n"
-                f"📈 AI 推論下一顆：{suggestion}"
-            )
+        while len(records) < 10:
+            filler = random.choice(["莊", "閒"])
+            supabase.table("records").insert({"line_user_id": user_id, "result": filler}).execute()
+            records.insert(0, filler)
+
+        feature = [1 if r == "莊" else 0 for r in records]
+        pred = model.predict_proba([feature])[0]
+        banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
+        suggestion = "莊" if pred[1] >= pred[0] else "閒"
+        reply = (
+            f"🔴 莊勝率：{banker}%\n"
+            f"🔵 閒勝率：{player}%\n"
+            f"📈 AI 推論下一顆：{suggestion}"
+        )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
     elif msg in ["莊", "閒"]:
@@ -152,4 +155,3 @@ def handle_message(event):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
