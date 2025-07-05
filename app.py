@@ -102,6 +102,13 @@ def get_quick_reply():
         QuickReplyButton(action=MessageAction(label="🔗 註冊網址", text="註冊網址")),
     ])
 
+# === 圖像預測錯誤避免限額問題，統一 reply_message ===
+def safe_reply(event, message_text):
+    try:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=message_text, quick_reply=get_quick_reply()))
+    except Exception as e:
+        print("[Error] Reply Message Failed:", str(e))
+
 # === LINE Message 處理 ===
 @handler.add(MessageEvent, message=(TextMessage, ImageMessage))
 def handle_message(event):
@@ -110,13 +117,10 @@ def handle_message(event):
     msg = event.message.text if isinstance(event.message, TextMessage) else None
 
     if not user['is_authorized']:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(
-            text=(
-                "🔒 尚未授權，請將以下 UID 提供給管理員開通：\n"
-                f"🆔 {user['user_code']}\n"
-                "📩 聯絡管理員：https://lin.ee/2ODINSW"
-            ),
-            quick_reply=get_quick_reply()
+        safe_reply(event, (
+            "🔒 尚未授權，請將以下 UID 提供給管理員開通：\n"
+            f"🆔 {user['user_code']}\n"
+            "📩 聯絡管理員：https://lin.ee/2ODINSW"
         ))
         return
 
@@ -130,14 +134,11 @@ def handle_message(event):
             "🔹 回傳結果後，請點『繼續分析』再進行下一步預測\n"
             "🔹 換房或結束後，請點『停止分析』關閉分析功能"
         )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=usage, quick_reply=get_quick_reply()))
+        safe_reply(event, usage)
         return
 
     if msg == "註冊網址":
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(
-            text="🔗 點擊進入註冊頁面：https://wek001.welove777.com",
-            quick_reply=get_quick_reply()
-        ))
+        safe_reply(event, "🔗 點擊進入註冊頁面：https://wek001.welove777.com")
         return
 
     if msg == "開始預測":
@@ -149,25 +150,22 @@ def handle_message(event):
             "後續每次上傳圖片將自動辨識並進行預測。\n"
             "若換房或結束，請輸入『停止分析』再重新上傳新的房間圖。"
         )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply, quick_reply=get_quick_reply()))
+        safe_reply(event, reply)
         return
 
     if msg == "停止分析":
         supabase.table("members").update({"prediction_active": False, "await_continue": False}).eq("line_user_id", user_id).execute()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(
-            text="🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。",
-            quick_reply=get_quick_reply()
-        ))
+        safe_reply(event, "🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。")
         return
 
     if msg == "繼續分析":
         supabase.table("members").update({"await_continue": False}).eq("line_user_id", user_id).execute()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ AI 已繼續分析，請輸入『莊』或『閒』以進行下一筆預測。", quick_reply=get_quick_reply()))
+        safe_reply(event, "✅ AI 已繼續分析，請輸入『莊』或『閒』以進行下一筆預測。")
         return
 
     if msg in ["莊", "閒"]:
         if user.get("await_continue", False):
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 請先輸入『繼續分析』以進行下一步預測。", quick_reply=get_quick_reply()))
+            safe_reply(event, "⚠️ 請先輸入『繼續分析』以進行下一步預測。")
             return
         supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
         history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
@@ -179,19 +177,16 @@ def handle_message(event):
             f"🔵 閒勝率：{player}%\n"
             f"📈 AI 推論下一顆：{suggestion}"
         )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply, quick_reply=get_quick_reply()))
+        safe_reply(event, reply)
         supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
         return
 
     if isinstance(event.message, ImageMessage):
         if not user.get("prediction_active", False):
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                text="⚠️ 預測尚未啟動，請先輸入『開始預測』以啟用分析。",
-                quick_reply=get_quick_reply()
-            ))
+            safe_reply(event, "⚠️ 預測尚未啟動，請先輸入『開始預測』以啟用分析。")
             return
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="圖片收到 ✅ 預測中，請稍後..."))
+        safe_reply(event, "圖片收到 ✅ 預測中，請稍後...")
         message_id = event.message.id
         image_path = f"/tmp/{message_id}.jpg"
         content = line_bot_api.get_message_content(message_id)
@@ -200,7 +195,7 @@ def handle_message(event):
                 f.write(chunk)
         results = detect_last_n_results(image_path)
         if not results:
-            line_bot_api.push_message(user_id, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。", quick_reply=get_quick_reply()))
+            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。")
             return
         for r in results:
             supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
@@ -212,11 +207,11 @@ def handle_message(event):
             f"🔵 閒勝率：{player}%\n\n"
             f"📈 AI 推論下一顆：{suggestion}"
         )
-        line_bot_api.push_message(user_id, TextSendMessage(text=reply, quick_reply=get_quick_reply()))
+        safe_reply(event, reply)
         supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
         return
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請選擇操作功能 👇", quick_reply=get_quick_reply()))
+    safe_reply(event, "請選擇操作功能 👇")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
