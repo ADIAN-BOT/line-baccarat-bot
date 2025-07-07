@@ -14,7 +14,11 @@ import joblib
 import random
 
 # === 載入模型 ===
-model = joblib.load("baccarat_model_trained.pkl")
+try:
+    model = joblib.load("baccarat_model_trained.pkl")
+except Exception as e:
+    print("❌ 模型載入失敗：", e)
+    model = None
 
 # === 初始化 Supabase ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
