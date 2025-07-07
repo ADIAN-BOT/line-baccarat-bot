@@ -100,7 +100,7 @@ def predict_from_recent_results(results):
     feature = [1 if r == "莊" else 0 for r in reversed(results)]
     while len(feature) < 10:
         feature.insert(0, 1 if random.random() > 0.5 else 0)
-    X = pd.DataFrame([feature], columns=[f"f{i}" for i in range(len(feature))])
+    X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
     pred = model.predict_proba(X)[0]
     banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
     suggestion = "莊" if pred[1] >= pred[0] else "閒"
