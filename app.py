@@ -195,12 +195,6 @@ def handle_image(event):
         safe_reply(event, "⚠️ 預測尚未啟動，請先輸入『開始預測』以啟用分析。")
         return
 
-    safe_reply(event, "圖片收到 ✅ 預測中，請稍後...")
-    threading.Thread(target=process_image_and_predict, args=(user_id, message_id)).start()
-
-from linebot.v3.messaging import PushMessageRequest  # 加在檔案上方
-
-def process_image_and_predict(user_id, message_id):
     try:
         image_path = f"/tmp/{message_id}.jpg"
         content = blob_api.get_message_content(message_id)
@@ -209,18 +203,13 @@ def process_image_and_predict(user_id, message_id):
 
         results = detect_last_n_results(image_path)
         if not results:
-            messaging_api.push_message(
-                PushMessageRequest(
-                    to=user_id,
-                    messages=[TextMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（避免模糊或斜角）。")]
-                )
-            )
+            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（避免模糊或斜角）。")
             return
 
         for r in results:
             supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
 
-        # 修正特徵名稱為 prev_0 ~ prev_9
+        # 建立模型輸入資料
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
         while len(feature) < 10:
             feature.insert(0, 1 if random.random() > 0.5 else 0)
@@ -238,22 +227,13 @@ def process_image_and_predict(user_id, message_id):
             f"📈 AI 推論下一顆：{suggestion}"
         )
 
-        messaging_api.push_message(
-            PushMessageRequest(
-                to=user_id,
-                messages=[TextMessage(text=reply)]
-            )
-        )
+        # 回傳預測結果
+        safe_reply(event, reply)
         supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
+
     except Exception as e:
         print("[處理圖片錯誤]", e)
-        messaging_api.push_message(
-            PushMessageRequest(
-                to=user_id,
-                messages=[TextMessage(text="❌ 發生錯誤，請稍後再試或聯絡管理員")]
-            )
-        )
-
+        safe_reply(event, "❌ 發生錯誤，請稍後再試或聯絡管理員")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
