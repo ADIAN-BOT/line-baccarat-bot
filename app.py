@@ -197,7 +197,7 @@ def handle_message(event):
 
         results = detect_last_n_results(image_path)
         if not results:
-            line_bot_api.push_message(user_id, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。", quick_reply=get_quick_reply()))
+            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。")
             return
 
         for r in results:
@@ -211,7 +211,7 @@ def handle_message(event):
             f"🔵 閒勝率：{player}%\n\n"
             f"📈 AI 推論下一顆：{suggestion}"
         )
-        line_bot_api.push_message(user_id, TextSendMessage(text=reply, quick_reply=get_quick_reply()))
+        safe_reply(event, reply)
         supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
         return
 
