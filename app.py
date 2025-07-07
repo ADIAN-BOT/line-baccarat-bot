@@ -198,7 +198,8 @@ def handle_image(event):
     safe_reply(event, "圖片收到 ✅ 預測中，請稍後...")
     threading.Thread(target=process_image_and_predict, args=(user_id, message_id)).start()
 
-# === 背景處理圖像與預測邏輯 ===
+from linebot.v3.messaging import PushMessageRequest  # 加在檔案上方
+
 def process_image_and_predict(user_id, message_id):
     try:
         image_path = f"/tmp/{message_id}.jpg"
@@ -209,15 +210,26 @@ def process_image_and_predict(user_id, message_id):
         results = detect_last_n_results(image_path)
         if not results:
             messaging_api.push_message(
-                to=user_id,
-                messages=[TextMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（避免模糊或斜角）。")]
+                PushMessageRequest(
+                    to=user_id,
+                    messages=[TextMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（避免模糊或斜角）。")]
+                )
             )
             return
 
         for r in results:
             supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
 
-        last_result, banker, player, suggestion = predict_from_recent_results(results)
+        # 修正特徵名稱為 prev_0 ~ prev_9
+        feature = [1 if r == "莊" else 0 for r in reversed(results)]
+        while len(feature) < 10:
+            feature.insert(0, 1 if random.random() > 0.5 else 0)
+        X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
+        pred = model.predict_proba(X)[0]
+        banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
+        suggestion = "莊" if pred[1] >= pred[0] else "閒"
+        last_result = results[0]
+
         reply = (
             f"📸 圖像辨識完成\n\n"
             f"🔙 最後一顆：{last_result}\n"
@@ -225,17 +237,23 @@ def process_image_and_predict(user_id, message_id):
             f"🔵 閒勝率：{player}%\n\n"
             f"📈 AI 推論下一顆：{suggestion}"
         )
+
         messaging_api.push_message(
-            to=user_id,
-            messages=[TextMessage(text=reply)]
+            PushMessageRequest(
+                to=user_id,
+                messages=[TextMessage(text=reply)]
+            )
         )
         supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
     except Exception as e:
         print("[處理圖片錯誤]", e)
         messaging_api.push_message(
-            to=user_id,
-            messages=[TextMessage(text="❌ 發生錯誤，請稍後再試或聯絡管理員")]
+            PushMessageRequest(
+                to=user_id,
+                messages=[TextMessage(text="❌ 發生錯誤，請稍後再試或聯絡管理員")]
+            )
         )
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
