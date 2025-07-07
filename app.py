@@ -7,7 +7,7 @@ import numpy as np
 from flask import Flask, request, abort
 from supabase import create_client, Client
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, ImageMessage,
     QuickReply, QuickReplyButton, MessageAction
@@ -78,7 +78,7 @@ def detect_last_n_results(image_path, n=10):
     sorted_results = [r for _, r in sorted(all_circles, key=lambda t: -t[0])]
     return sorted_results[:n]
 
-# === 圖像分析與預測邏輯（直接使用偵測結果） ===
+# === 預測邏輯 ===
 def predict_from_recent_results(results):
     if not results:
         return "無", 0.0, 0.0, "無法判斷"
@@ -102,32 +102,19 @@ def get_quick_reply():
         QuickReplyButton(action=MessageAction(label="🔗 註冊網址", text="註冊網址")),
     ])
 
-# === 安全回覆（加上 LINE API 錯誤防護） ===
+# === 安全回覆 ===
 def safe_reply(event, message_text):
     try:
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(
-                text=message_text,
-                quick_reply=get_quick_reply()
-            )
+            TextSendMessage(text=message_text, quick_reply=get_quick_reply())
         )
     except LineBotApiError as e:
-        if e.status_code == 429:
-            print("\u26a0\ufe0f LINE API 限額達上限（429）使用者將收不到回覆")
-        else:
-            print(f"❗ LINE API 錯誤 {e.status_code}: {str(e)}")
-    except Exception as e:
-        print("❗ 其他錯誤：", str(e))
-
-# === 圖像預測錯誤避免限額問題，統一 reply_message ===
-def safe_reply(event, message_text):
-    try:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=message_text, quick_reply=get_quick_reply()))
-    except Exception as e:
         print("[Error] Reply Message Failed:", str(e))
+    except Exception as e:
+        print("[Error] Unexpected Exception:", str(e))
 
-# === LINE Message 處理 ===
+# === 處理訊息 ===
 @handler.add(MessageEvent, message=(TextMessage, ImageMessage))
 def handle_message(event):
     user_id = event.source.user_id
@@ -135,11 +122,7 @@ def handle_message(event):
     msg = event.message.text if isinstance(event.message, TextMessage) else None
 
     if not user['is_authorized']:
-        safe_reply(event, (
-            "🔒 尚未授權，請將以下 UID 提供給管理員開通：\n"
-            f"🆔 {user['user_code']}\n"
-            "📩 聯絡管理員：https://lin.ee/2ODINSW"
-        ))
+        safe_reply(event, f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW")
         return
 
     if msg == "使用說明":
@@ -211,13 +194,16 @@ def handle_message(event):
         with open(image_path, "wb") as f:
             for chunk in content.iter_content():
                 f.write(chunk)
+
         results = detect_last_n_results(image_path)
         if not results:
-            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。")
+            line_bot_api.push_message(user_id, TextSendMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。", quick_reply=get_quick_reply()))
             return
+
         for r in results:
             supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
         last_result, banker, player, suggestion = predict_from_recent_results(results)
+
         reply = (
             f"📸 圖像辨識完成\n\n"
             f"🔙 最後一顆：{last_result}\n"
@@ -225,7 +211,7 @@ def handle_message(event):
             f"🔵 閒勝率：{player}%\n\n"
             f"📈 AI 推論下一顆：{suggestion}"
         )
-        safe_reply(event, reply)
+        line_bot_api.push_message(user_id, TextSendMessage(text=reply, quick_reply=get_quick_reply()))
         supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
         return
 
@@ -233,4 +219,3 @@ def handle_message(event):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
