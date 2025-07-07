@@ -36,7 +36,8 @@ app = Flask(__name__)
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    try:
+    print("[Webhook 收到訊息]", body)  # ⬅️ 加這行觀察   
+ try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
