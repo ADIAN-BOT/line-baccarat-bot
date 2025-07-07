@@ -16,7 +16,7 @@ import joblib
 import random
 
 # === 載入模型 ===
-model = joblib.load("baccarat_model.pkl")
+model = joblib.load("baccarat_model_trained.pkl")
 
 # === 初始化 Supabase ===
 SUPABASE_URL = os.getenv("SUPABASE_URL")
