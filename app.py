@@ -236,8 +236,7 @@ def handle_image(event):
     image_path = f"/tmp/{message_id}.jpg"
     content = blob_api.get_message_content(message_id)
     with open(image_path, "wb") as f:
-        for chunk in content.iter_content():
-            f.write(chunk)
+            f.write(content)
 
     results = detect_last_n_results(image_path)
     if not results:
