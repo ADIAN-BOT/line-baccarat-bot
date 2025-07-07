@@ -2,18 +2,20 @@ from dotenv import load_dotenv
 load_dotenv()
 import os
 import uuid
-import tempfile
-import requests
 import cv2
+import random
 import numpy as np
 from flask import Flask, request, abort
 from supabase import create_client, Client
-from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
-
 import joblib
-import random
+
+from linebot.v3 import WebhookHandler
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
+from linebot.v3.messaging import (
+    MessagingApi, MessagingApiBlob, Configuration, ApiClient,
+    TextMessage, QuickReply, QuickReplyButton, MessageAction, ReplyMessageRequest
+)
+from linebot.v3.exceptions import InvalidSignatureError
 
 # === 載入模型 ===
 try:
