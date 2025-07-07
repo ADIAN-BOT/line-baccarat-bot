@@ -9,11 +9,7 @@ from supabase import create_client, Client
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
-from linebot.v3.messaging import (
-    MessagingApi, MessagingApiBlob,
-    ReplyMessageRequest, TextMessage,
-    QuickReply, QuickReplyItem, MessageAction
-)
+
 import joblib
 import random
 
