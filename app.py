@@ -134,8 +134,52 @@ def handle_text(event):
     msg = event.message.text.strip()
     user_id = event.source.user_id
     user = get_or_create_user(user_id)
-    # 原邏輯保留
-    ...
+
+    if msg == "註冊網址":
+        safe_reply(event, "🔗 點擊進入註冊頁面：https://wek001.welove777.com")
+        return
+
+    if msg == "開始預測":
+        supabase.table("members").update({"prediction_active": True, "await_continue": False}).eq("line_user_id", user_id).execute()
+        reply = (
+            "請先上傳房間資訊 📝\n"
+            "成功後將顯示：\n"
+            "房間數據分析成功✔\nAI模型已建立初步判斷\n\n"
+            "後續每次上傳圖片將自動辨識並進行預測。\n"
+            "若換房或結束，請輸入『停止分析』再重新上傳新的房間圖。"
+        )
+        safe_reply(event, reply)
+        return
+
+    if msg == "停止分析":
+        supabase.table("members").update({"prediction_active": False, "await_continue": False}).eq("line_user_id", user_id).execute()
+        safe_reply(event, "🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。")
+        return
+
+    if msg == "繼續分析":
+        supabase.table("members").update({"await_continue": False}).eq("line_user_id", user_id).execute()
+        safe_reply(event, "✅ AI 已繼續分析，請輸入『莊』或『閒』以進行下一筆預測。")
+        return
+
+    if msg in ["莊", "閒"]:
+        if user.get("await_continue", False):
+            safe_reply(event, "⚠️ 請先輸入『繼續分析』以進行下一步預測。")
+            return
+        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
+        history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
+        results = [r["result"] for r in reversed(history.data)]
+        last_result, banker, player, suggestion = predict_from_recent_results(results)
+        reply = (
+            f"✅ 已記錄：{msg}\n\n"
+            f"🔴 莊勝率：{banker}%\n"
+            f"🔵 閒勝率：{player}%\n"
+            f"📈 AI 推論下一顆：{suggestion}"
+        )
+        safe_reply(event, reply)
+        supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
+        return
+
+    safe_reply(event, "請選擇操作功能 👇")
 
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event):
