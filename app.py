@@ -219,7 +219,7 @@ def handle_image(event):
 
     results = detect_last_n_results(image_path)
     if not results:
-        safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。")
+        safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（避免模糊或斜角）。")
         return
 
     for r in results:
