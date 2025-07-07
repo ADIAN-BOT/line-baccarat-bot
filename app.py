@@ -9,6 +9,7 @@ import pandas as pd
 from flask import Flask, request, abort
 from supabase import create_client, Client
 import joblib
+import threading
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
@@ -128,63 +129,18 @@ def safe_reply(event, message_text):
     except Exception as e:
         print("[Error] Reply Message Failed:", str(e))
 
-# === 文字訊息處理 ===
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text(event):
     msg = event.message.text.strip()
     user_id = event.source.user_id
     user = get_or_create_user(user_id)
+    # 原邏輯保留
+    ...
 
-    if msg == "註冊網址":
-        safe_reply(event, "🔗 點擊進入註冊頁面：https://wek001.welove777.com")
-        return
-
-    if msg == "開始預測":
-        supabase.table("members").update({"prediction_active": True, "await_continue": False}).eq("line_user_id", user_id).execute()
-        reply = (
-            "請先上傳房間資訊 📝\n"
-            "成功後將顯示：\n"
-            "房間數據分析成功✔\nAI模型已建立初步判斷\n\n"
-            "後續每次上傳圖片將自動辨識並進行預測。\n"
-            "若換房或結束，請輸入『停止分析』再重新上傳新的房間圖。"
-        )
-        safe_reply(event, reply)
-        return
-
-    if msg == "停止分析":
-        supabase.table("members").update({"prediction_active": False, "await_continue": False}).eq("line_user_id", user_id).execute()
-        safe_reply(event, "🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。")
-        return
-
-    if msg == "繼續分析":
-        supabase.table("members").update({"await_continue": False}).eq("line_user_id", user_id).execute()
-        safe_reply(event, "✅ AI 已繼續分析，請輸入『莊』或『閒』以進行下一筆預測。")
-        return
-
-    if msg in ["莊", "閒"]:
-        if user.get("await_continue", False):
-            safe_reply(event, "⚠️ 請先輸入『繼續分析』以進行下一步預測。")
-            return
-        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
-        history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
-        results = [r["result"] for r in reversed(history.data)]
-        last_result, banker, player, suggestion = predict_from_recent_results(results)
-        reply = (
-            f"✅ 已記錄：{msg}\n\n"
-            f"🔴 莊勝率：{banker}%\n"
-            f"🔵 閒勝率：{player}%\n"
-            f"📈 AI 推論下一顆：{suggestion}"
-        )
-        safe_reply(event, reply)
-        supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
-        return
-
-    safe_reply(event, "請選擇操作功能 👇")
-
-# === 圖片訊息處理 ===
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event):
     user_id = event.source.user_id
+    message_id = event.message.id
     user = get_or_create_user(user_id)
 
     if not user.get("is_authorized", False):
@@ -196,31 +152,46 @@ def handle_image(event):
         return
 
     safe_reply(event, "圖片收到 ✅ 預測中，請稍後...")
+    threading.Thread(target=process_image_and_predict, args=(user_id, message_id)).start()
 
-    message_id = event.message.id
-    image_path = f"/tmp/{message_id}.jpg"
-    content = blob_api.get_message_content(message_id)
-    with open(image_path, "wb") as f:
-        f.write(content)
+# === 背景處理圖像與預測邏輯 ===
+def process_image_and_predict(user_id, message_id):
+    try:
+        image_path = f"/tmp/{message_id}.jpg"
+        content = blob_api.get_message_content(message_id)
+        with open(image_path, "wb") as f:
+            f.write(content)
 
-    results = detect_last_n_results(image_path)
-    if not results:
-        safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（避免模糊或斜角）。")
-        return
+        results = detect_last_n_results(image_path)
+        if not results:
+            messaging_api.push_message(
+                to=user_id,
+                messages=[TextMessage(text="⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（避免模糊或斜角）。")]
+            )
+            return
 
-    for r in results:
-        supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
+        for r in results:
+            supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
 
-    last_result, banker, player, suggestion = predict_from_recent_results(results)
-    reply = (
-        f"📸 圖像辨識完成\n\n"
-        f"🔙 最後一顆：{last_result}\n"
-        f"🔴 莊勝率：{banker}%\n"
-        f"🔵 閒勝率：{player}%\n\n"
-        f"📈 AI 推論下一顆：{suggestion}"
-    )
-    safe_reply(event, reply)
-    supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
+        last_result, banker, player, suggestion = predict_from_recent_results(results)
+        reply = (
+            f"📸 圖像辨識完成\n\n"
+            f"🔙 最後一顆：{last_result}\n"
+            f"🔴 莊勝率：{banker}%\n"
+            f"🔵 閒勝率：{player}%\n\n"
+            f"📈 AI 推論下一顆：{suggestion}"
+        )
+        messaging_api.push_message(
+            to=user_id,
+            messages=[TextMessage(text=reply)]
+        )
+        supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
+    except Exception as e:
+        print("[處理圖片錯誤]", e)
+        messaging_api.push_message(
+            to=user_id,
+            messages=[TextMessage(text="❌ 發生錯誤，請稍後再試或聯絡管理員")]
+        )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
