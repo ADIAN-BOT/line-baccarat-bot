@@ -25,12 +25,19 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+from linebot.v3.messaging import MessagingApi, MessagingApiBlob, Configuration, ApiClient
+
 # === 初始化 LINE ===
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-messaging_api = MessagingApi(access_token=LINE_CHANNEL_ACCESS_TOKEN)
-blob_api = MessagingApiBlob(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+
+configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+api_client = ApiClient(configuration)
+
+messaging_api = MessagingApi(api_client)
+blob_api = MessagingApiBlob(api_client)
 
 # === Flask App ===
 app = Flask(__name__)
