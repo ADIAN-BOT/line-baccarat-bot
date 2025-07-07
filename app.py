@@ -12,9 +12,18 @@ import joblib
 from linebot.v3 import WebhookHandler
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
 from linebot.v3.messaging import (
-    MessagingApi, MessagingApiBlob, Configuration, ApiClient,
-    TextMessage, QuickReply, QuickReplyButton, MessageAction, ReplyMessageRequest
+    TextMessage, QuickReply, QuickReplyItem, MessageAction, ReplyMessageRequest
 )
+
+def safe_reply(event, message_text):
+    try:
+        messaging_api.reply_message(ReplyMessageRequest(
+            reply_token=event.reply_token,
+            messages=[TextMessage(text=message_text, quick_reply=get_quick_reply())]
+        ))
+    except Exception as e:
+        print("[回覆錯誤]", e)
+
 from linebot.v3.exceptions import InvalidSignatureError
 
 # === 載入模型 ===
