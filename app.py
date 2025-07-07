@@ -7,8 +7,13 @@ import numpy as np
 from flask import Flask, request, abort
 from supabase import create_client, Client
 from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError, LineBotApiError
-from linebot.v3.messaging import MessagingApi, MessagingApiBlob, TextMessageContent, ImageMessageContent, ReplyMessageRequest, TextMessage, QuickReply, QuickReplyItem, MessageAction, MessageEvent
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.messaging import (
+    MessagingApi, MessagingApiBlob,
+    TextMessageContent, ImageMessageContent,
+    ReplyMessageRequest, TextMessage,
+    QuickReply, QuickReplyItem, MessageAction, MessageEvent
+)
 import joblib
 import random
 
