@@ -5,6 +5,7 @@ import uuid
 import cv2
 import random
 import numpy as np
+import pandas as pd
 from flask import Flask, request, abort
 from supabase import create_client, Client
 import joblib
@@ -14,17 +15,8 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageCo
 from linebot.v3.messaging import (
     TextMessage, QuickReply, QuickReplyItem, MessageAction, ReplyMessageRequest
 )
-
-def safe_reply(event, message_text):
-    try:
-        messaging_api.reply_message(ReplyMessageRequest(
-            reply_token=event.reply_token,
-            messages=[TextMessage(text=message_text, quick_reply=get_quick_reply())]
-        ))
-    except Exception as e:
-        print("[回覆錯誤]", e)
-
 from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.messaging import MessagingApi, MessagingApiBlob, Configuration, ApiClient
 
 # === 載入模型 ===
 try:
@@ -37,8 +29,6 @@ except Exception as e:
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-from linebot.v3.messaging import MessagingApi, MessagingApiBlob, Configuration, ApiClient
 
 # === 初始化 LINE ===
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -109,7 +99,8 @@ def predict_from_recent_results(results):
     feature = [1 if r == "莊" else 0 for r in reversed(results)]
     while len(feature) < 10:
         feature.insert(0, 1 if random.random() > 0.5 else 0)
-    pred = model.predict_proba([feature])[0]
+    X = pd.DataFrame([feature], columns=[f"f{i}" for i in range(len(feature))])
+    pred = model.predict_proba(X)[0]
     banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
     suggestion = "莊" if pred[1] >= pred[0] else "閒"
     return results[0], banker, player, suggestion
@@ -140,35 +131,9 @@ def safe_reply(event, message_text):
 # === 文字訊息處理 ===
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text(event):
+    msg = event.message.text.strip()
     user_id = event.source.user_id
     user = get_or_create_user(user_id)
-    msg = event.message.text.strip()
-
-    print("📝 收到文字訊息：", msg)
-
-    if not user['is_authorized']:
-        safe_reply(event, f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW")
-        return
-
-    if msg == "使用說明":
-        usage = (
-            "📘 使用說明：\n\n"
-            "1️⃣ 開始預測前請先複製 UID 給客服人員\n"
-            "2️⃣ 開通後即可開始操作，操作步驟如下：\n"
-            "🔹 上傳你所在房間的大路圖表格\n"
-            "🔹 圖片分析成功後，會自動回傳上一顆是莊或閒\n"
-            "🔹 回傳結果後，請點『繼續分析』再進行下一步預測\n"
-            "🔹 換房或結束後，請點『停止分析』關閉分析功能\n\n"
-            "🧠 快速指令：\n"
-            "🔍 開始預測 → 啟用預測模式\n"
-            "🔴 莊／🔵 閒 → 傳入實際結果\n"
-            "▶️ 繼續分析 → 啟用下一顆預測\n"
-            "⛔ 停止分析 → 結束預測模式\n"
-            "📘 使用說明 → 查看教學內容\n"
-            "🔗 註冊網址 → 查看註冊頁面"
-        )
-        safe_reply(event, usage)
-        return
 
     if msg == "註冊網址":
         safe_reply(event, "🔗 點擊進入註冊頁面：https://wek001.welove777.com")
@@ -236,7 +201,7 @@ def handle_image(event):
     image_path = f"/tmp/{message_id}.jpg"
     content = blob_api.get_message_content(message_id)
     with open(image_path, "wb") as f:
-            f.write(content)
+        f.write(content)
 
     results = detect_last_n_results(image_path)
     if not results:
