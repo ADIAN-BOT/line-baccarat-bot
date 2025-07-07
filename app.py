@@ -102,6 +102,24 @@ def get_quick_reply():
         QuickReplyButton(action=MessageAction(label="🔗 註冊網址", text="註冊網址")),
     ])
 
+# === 安全回覆（加上 LINE API 錯誤防護） ===
+def safe_reply(event, message_text):
+    try:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(
+                text=message_text,
+                quick_reply=get_quick_reply()
+            )
+        )
+    except LineBotApiError as e:
+        if e.status_code == 429:
+            print("\u26a0\ufe0f LINE API 限額達上限（429）使用者將收不到回覆")
+        else:
+            print(f"❗ LINE API 錯誤 {e.status_code}: {str(e)}")
+    except Exception as e:
+        print("❗ 其他錯誤：", str(e))
+
 # === 圖像預測錯誤避免限額問題，統一 reply_message ===
 def safe_reply(event, message_text):
     try:
