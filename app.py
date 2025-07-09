@@ -140,20 +140,20 @@ def handle_text(event):
         return
 
     if msg == "開始預測":
-    if not user.get("is_authorized", False):
-        safe_reply(event, f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW")
-        return
+        if not user.get("is_authorized", False):
+            safe_reply(event, f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW")
+            return
 
-    supabase.table("members").update({"prediction_active": True, "await_continue": False}).eq("line_user_id", user_id).execute()
-    reply = (
-        "請先上傳房間資訊 📝\n"
-        "成功後將顯示：\n"
-        "房間數據分析成功✔\nAI模型已建立初步判斷\n\n"
-        "後續每次上傳圖片將自動辨識並進行預測。\n"
-        "若換房或結束，請輸入『停止分析』再重新上傳新的房間圖。"
-    )
-    safe_reply(event, reply)
-    return
+        supabase.table("members").update({"prediction_active": True, "await_continue": False}).eq("line_user_id", user_id).execute()
+        reply = (
+            "請先上傳房間資訊 📝\n"
+            "成功後將顯示：\n"
+            "房間數據分析成功✔\nAI模型已建立初步判斷\n\n"
+            "後續每次上傳圖片將自動辨識並進行預測。\n"
+            "若換房或結束，請輸入『停止分析』再重新上傳新的房間圖。"
+        )
+        safe_reply(event, reply)
+        return
 
 
     if msg == "停止分析":
