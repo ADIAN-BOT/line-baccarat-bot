@@ -46,8 +46,11 @@ blob_api = MessagingApiBlob(api_client)
 # === Flask App ===
 app = Flask(__name__)
 
-@app.route("/callback", methods=['POST'])
+@app.route("/callback", methods=['POST', 'HEAD'])
 def callback():
+    if request.method == 'HEAD':
+        return '', 200  # 讓 HEAD 也回應 200，不做任何事
+    # 原本的 POST 處理邏輯
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     print("[Webhook 收到訊息]", body)
