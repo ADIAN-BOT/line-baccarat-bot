@@ -139,7 +139,7 @@ def handle_text(event):
         safe_reply(event, "🔗 點擊進入註冊頁面：https://wek001.welove777.com")
         return
 
- if msg == "開始預測":
+    if msg == "開始預測":
     if not user.get("is_authorized", False):
         safe_reply(event, f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW")
         return
