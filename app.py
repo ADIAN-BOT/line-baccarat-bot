@@ -215,7 +215,8 @@ def handle_image(event):
             return
 
         for r in results:
-            supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
+            if r in ["莊", "閒"]:
+                supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
 
         # 建立模型輸入資料
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
@@ -241,7 +242,8 @@ def handle_image(event):
 
     except Exception as e:
         print("[處理圖片錯誤]", e)
-        safe_reply(event, "❌ 發生錯誤，請稍後再試或聯絡管理員")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
