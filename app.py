@@ -77,7 +77,7 @@ def get_or_create_user(user_id):
     return new_user
 
 # === 圖像分析辨識前 N 顆莊或閒 ===
-def detect_last_n_results(image_path, n=10):
+def detect_last_n_results(image_path, n=24):
     img = cv2.imread(image_path)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     lower_red1 = np.array([0, 100, 100])
@@ -101,7 +101,7 @@ def predict_from_recent_results(results):
     if not results:
         return "無", 0.0, 0.0, "無法判斷"
     feature = [1 if r == "莊" else 0 for r in reversed(results)]
-    while len(feature) < 10:
+    while len(feature) < 24:
         feature.insert(0, 1 if random.random() > 0.5 else 0)
     X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
     pred = model.predict_proba(X)[0]
@@ -220,7 +220,7 @@ def handle_image(event):
 
         # 建立模型輸入資料
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
-        while len(feature) < 10:
+        while len(feature) < 24:
             feature.insert(0, 1 if random.random() > 0.5 else 0)
         X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
         pred = model.predict_proba(X)[0]
