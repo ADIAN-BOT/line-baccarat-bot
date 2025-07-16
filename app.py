@@ -207,7 +207,7 @@ def handle_image(event):
         image_path = f"/tmp/{message_id}.jpg"
         content = blob_api.get_message_content(message_id)
         with open(image_path, "wb") as f:
-            f.write(content.content)  # <- 加上 .content 取得內容
+            f.write(content)  # ← ✅ 正解
 
         results = detect_last_n_results(image_path)
         if not results:
