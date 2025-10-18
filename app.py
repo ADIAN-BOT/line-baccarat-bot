@@ -115,7 +115,6 @@ def get_quick_reply():
         QuickReplyItem(action=MessageAction(label="🔍 開始預測", text="開始預測")),
         QuickReplyItem(action=MessageAction(label="🔴 莊", text="莊")),
         QuickReplyItem(action=MessageAction(label="🔵 閒", text="閒")),
-        QuickReplyItem(action=MessageAction(label="▶️ 繼續分析", text="繼續分析")),
         QuickReplyItem(action=MessageAction(label="⛔ 停止預測", text="停止分析")),
         QuickReplyItem(action=MessageAction(label="📘 使用說明", text="使用說明")),
         QuickReplyItem(action=MessageAction(label="🔗 註冊網址", text="註冊網址")),
@@ -164,15 +163,7 @@ def handle_text(event):
         safe_reply(event, "🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。")
         return
 
-    if msg == "繼續分析":
-        supabase.table("members").update({"await_continue": False}).eq("line_user_id", user_id).execute()
-        safe_reply(event, "✅ AI 已繼續分析，請輸入『莊』或『閒』以進行下一筆預測。")
-        return
-
     if msg in ["莊", "閒"]:
-        if user.get("await_continue", False):
-            safe_reply(event, "⚠️ 請先輸入『繼續分析』以進行下一步預測。")
-            return
         supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
         history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
         results = [r["result"] for r in reversed(history.data)]
@@ -184,7 +175,6 @@ def handle_text(event):
             f"📈 AI 推論下一顆：{suggestion}"
         )
         safe_reply(event, reply)
-        supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
         return
 
     safe_reply(event, "請選擇操作功能 👇")
