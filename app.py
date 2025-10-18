@@ -228,7 +228,6 @@ def handle_image(event):
 
         # 回傳預測結果
         safe_reply(event, reply)
-        supabase.table("members").update({"await_continue": True}).eq("line_user_id", user_id).execute()
 
     except Exception as e:
         print("[處理圖片錯誤]", e)
