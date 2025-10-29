@@ -9,7 +9,6 @@ import pandas as pd
 from flask import Flask, request, abort
 from supabase import create_client, Client
 import joblib
-import threading
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
@@ -49,8 +48,7 @@ app = Flask(__name__)
 @app.route("/callback", methods=['POST', 'HEAD'])
 def callback():
     if request.method == 'HEAD':
-        return '', 200  # 讓 HEAD 也回應 200，不做任何事
-    # 原本的 POST 處理邏輯
+        return '', 200
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     print("[Webhook 收到訊息]", body)
@@ -70,8 +68,7 @@ def get_or_create_user(user_id):
         "line_user_id": user_id,
         "user_code": user_code,
         "is_authorized": False,
-        "prediction_active": False,
-        "await_continue": False
+        "prediction_active": False
     }
     supabase.table("members").insert(new_user).execute()
     return new_user
@@ -115,9 +112,8 @@ def get_quick_reply():
         QuickReplyItem(action=MessageAction(label="🔍 開始預測", text="開始預測")),
         QuickReplyItem(action=MessageAction(label="🔴 莊", text="莊")),
         QuickReplyItem(action=MessageAction(label="🔵 閒", text="閒")),
+        QuickReplyItem(action=MessageAction(label="🟢 和局", text="和局")),
         QuickReplyItem(action=MessageAction(label="⛔ 停止預測", text="停止分析")),
-        QuickReplyItem(action=MessageAction(label="📘 使用說明", text="使用說明")),
-        QuickReplyItem(action=MessageAction(label="🔗 註冊網址", text="註冊網址")),
     ])
 
 # === 安全回覆 ===
@@ -131,36 +127,55 @@ def safe_reply(event, message_text):
     except Exception as e:
         print("[Error] Reply Message Failed:", str(e))
 
+# === 平衡加權和局預測 ===
+def weighted_tie_prediction(user_id):
+    res = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
+    if not res.data:
+        return random.choice(["莊", "閒"]), 50.0, 50.0
+
+    results = [r["result"] for r in res.data if r["result"] in ["莊", "閒"]]
+    banker_count = results.count("莊")
+    player_count = results.count("閒")
+
+    total = banker_count + player_count
+    if total == 0:
+        return random.choice(["莊", "閒"]), 50.0, 50.0
+
+    banker_ratio = banker_count / total
+    player_ratio = player_count / total
+
+    # 讓權重差距平滑，不會過大
+    avg = (banker_ratio + player_ratio) / 2
+    banker_weight = 0.5 + (banker_ratio - avg) * 0.5
+    player_weight = 0.5 + (player_ratio - avg) * 0.5
+
+    # 正規化成 0~1
+    total_weight = banker_weight + player_weight
+    banker_weight /= total_weight
+    player_weight /= total_weight
+
+    prediction = random.choices(["莊", "閒"], weights=[banker_weight, player_weight])[0]
+
+    return prediction, round(banker_weight * 100, 1), round(player_weight * 100, 1)
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text(event):
     msg = event.message.text.strip()
     user_id = event.source.user_id
     user = get_or_create_user(user_id)
 
-    if msg == "註冊網址":
-        safe_reply(event, "🔗 點擊進入註冊頁面：https://wek001.welove777.com")
-        return
-
     if msg == "開始預測":
         if not user.get("is_authorized", False):
             safe_reply(event, f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW")
             return
 
-        supabase.table("members").update({"prediction_active": True, "await_continue": False}).eq("line_user_id", user_id).execute()
-        reply = (
-            "請先上傳房間資訊 📝\n"
-            "成功後將顯示：\n"
-            "房間數據分析成功✔\nAI模型已建立初步判斷\n\n"
-            "後續每次上傳圖片將自動辨識並進行預測。\n"
-            "若換房或結束，請輸入『停止分析』再重新上傳新的房間圖。"
-        )
-        safe_reply(event, reply)
+        supabase.table("members").update({"prediction_active": True}).eq("line_user_id", user_id).execute()
+        safe_reply(event, "✅ 已啟用 AI 預測模式，請上傳房間圖片開始分析。")
         return
 
-
     if msg == "停止分析":
-        supabase.table("members").update({"prediction_active": False, "await_continue": False}).eq("line_user_id", user_id).execute()
-        safe_reply(event, "🛑 AI 分析已結束，若需進行新的預測請先上傳房間圖片並點擊『開始預測』重新啟用。")
+        supabase.table("members").update({"prediction_active": False}).eq("line_user_id", user_id).execute()
+        safe_reply(event, "🛑 AI 分析已結束。若要重新開始請輸入『開始預測』。")
         return
 
     if msg in ["莊", "閒"]:
@@ -168,11 +183,20 @@ def handle_text(event):
         history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
         results = [r["result"] for r in reversed(history.data)]
         last_result, banker, player, suggestion = predict_from_recent_results(results)
+        safe_reply(event, f"✅ 已記錄：{msg}\n\n🔴 莊勝率：{banker}%\n🔵 閒勝率：{player}%\n📈 AI 推論下一顆：{suggestion}")
+        return
+
+    if msg == "和局":
+        # 寫入 Supabase
+        supabase.table("records").insert({"line_user_id": user_id, "result": "和"}).execute()
+
+        # 加權預測 + 顯示比例
+        weighted_choice, banker_weight, player_weight = weighted_tie_prediction(user_id)
+
         reply = (
-            f"✅ 已記錄：{msg}\n\n"
-            f"🔴 莊勝率：{banker}%\n"
-            f"🔵 閒勝率：{player}%\n"
-            f"📈 AI 推論下一顆：{suggestion}"
+            f"🟢 和局紀錄完成\n\n"
+            f"📊 根據最近莊閒比例加權預測：{weighted_choice}\n"
+            f"📈 權重：莊 {banker_weight}%｜閒 {player_weight}%"
         )
         safe_reply(event, reply)
         return
@@ -190,25 +214,24 @@ def handle_image(event):
         return
 
     if not user.get("prediction_active", False):
-        safe_reply(event, "⚠️ 預測尚未啟動，請先輸入『開始預測』以啟用分析。")
+        safe_reply(event, "⚠️ 請先輸入『開始預測』以啟用分析。")
         return
 
     try:
         image_path = f"/tmp/{message_id}.jpg"
         content = blob_api.get_message_content(message_id)
         with open(image_path, "wb") as f:
-            f.write(content)  # ← ✅ 正解
+            f.write(content)
 
         results = detect_last_n_results(image_path)
         if not results:
-            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（避免模糊或斜角）。")
+            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。")
             return
 
         for r in results:
             if r in ["莊", "閒"]:
                 supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
 
-        # 建立模型輸入資料
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
         while len(feature) < 24:
             feature.insert(0, 1 if random.random() > 0.5 else 0)
@@ -225,14 +248,10 @@ def handle_image(event):
             f"🔵 閒勝率：{player}%\n\n"
             f"📈 AI 推論下一顆：{suggestion}"
         )
-
-        # 回傳預測結果
         safe_reply(event, reply)
 
     except Exception as e:
         print("[處理圖片錯誤]", e)
-        import traceback
-        traceback.print_exc()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
