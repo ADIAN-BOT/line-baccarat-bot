@@ -73,6 +73,17 @@ def get_or_create_user(user_id):
     supabase.table("members").insert(new_user).execute()
     return new_user
 
+# === 授權檢查 ===
+def check_user_authorized(event, user):
+    """未授權者直接回覆提示並中斷流程"""
+    if not user.get("is_authorized", False):
+        safe_reply(
+            event,
+            f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW"
+        )
+        return False
+    return True
+
 # === 圖像分析辨識前 N 顆莊或閒 ===
 def detect_last_n_results(image_path, n=24):
     img = cv2.imread(image_path)
@@ -127,7 +138,7 @@ def safe_reply(event, message_text):
     except Exception as e:
         print("[Error] Reply Message Failed:", str(e))
 
-# === 平衡加權和局預測 ===
+# === 和局加權預測 ===
 def weighted_tie_prediction(user_id):
     res = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
     if not res.data:
@@ -136,39 +147,37 @@ def weighted_tie_prediction(user_id):
     results = [r["result"] for r in res.data if r["result"] in ["莊", "閒"]]
     banker_count = results.count("莊")
     player_count = results.count("閒")
-
     total = banker_count + player_count
     if total == 0:
         return random.choice(["莊", "閒"]), 50.0, 50.0
 
     banker_ratio = banker_count / total
     player_ratio = player_count / total
-
-    # 讓權重差距平滑，不會過大
     avg = (banker_ratio + player_ratio) / 2
-    banker_weight = 0.5 + (banker_ratio - avg) * 0.5
-    player_weight = 0.5 + (player_ratio - avg) * 0.5
 
-    # 正規化成 0~1
+    banker_weight = 0.5 + (banker_ratio - avg) * 0.6
+    player_weight = 0.5 + (player_ratio - avg) * 0.6
+
     total_weight = banker_weight + player_weight
     banker_weight /= total_weight
     player_weight /= total_weight
 
     prediction = random.choices(["莊", "閒"], weights=[banker_weight, player_weight])[0]
-
     return prediction, round(banker_weight * 100, 1), round(player_weight * 100, 1)
 
+# === 處理文字訊息 ===
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text(event):
     msg = event.message.text.strip()
     user_id = event.source.user_id
     user = get_or_create_user(user_id)
 
-    if msg == "開始預測":
-        if not user.get("is_authorized", False):
-            safe_reply(event, f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW")
-            return
+    # --- 授權檢查 ---
+    if not check_user_authorized(event, user):
+        return
 
+    # === 預測流程 ===
+    if msg == "開始預測":
         supabase.table("members").update({"prediction_active": True}).eq("line_user_id", user_id).execute()
         safe_reply(event, "✅ 已啟用 AI 預測模式，請上傳房間圖片開始分析。")
         return
@@ -187,12 +196,8 @@ def handle_text(event):
         return
 
     if msg == "和局":
-        # 寫入 Supabase
         supabase.table("records").insert({"line_user_id": user_id, "result": "和"}).execute()
-
-        # 加權預測 + 顯示比例
         weighted_choice, banker_weight, player_weight = weighted_tie_prediction(user_id)
-
         reply = (
             f"🟢 和局紀錄完成\n\n"
             f"📊 根據最近莊閒比例加權預測：{weighted_choice}\n"
@@ -203,14 +208,15 @@ def handle_text(event):
 
     safe_reply(event, "請選擇操作功能 👇")
 
+# === 處理圖片 ===
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event):
     user_id = event.source.user_id
     message_id = event.message.id
     user = get_or_create_user(user_id)
 
-    if not user.get("is_authorized", False):
-        safe_reply(event, f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW")
+    # --- 授權檢查 ---
+    if not check_user_authorized(event, user):
         return
 
     if not user.get("prediction_active", False):
