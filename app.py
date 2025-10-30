@@ -6,6 +6,8 @@ import cv2
 import random
 import numpy as np
 import pandas as pd
+import time
+import threading
 from flask import Flask, request, abort
 from supabase import create_client, Client
 import joblib
@@ -18,7 +20,7 @@ from linebot.v3.messaging import (
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import MessagingApi, MessagingApiBlob, Configuration, ApiClient
 
-# === 載入模型 ===
+# === 模型載入 ===
 try:
     model = joblib.load("baccarat_model_trained.pkl")
 except Exception as e:
@@ -35,15 +37,39 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 api_client = ApiClient(configuration)
-
 messaging_api = MessagingApi(api_client)
 blob_api = MessagingApiBlob(api_client)
 
 # === Flask App ===
 app = Flask(__name__)
+
+# === 自動清理 /tmp/ ===
+def clean_tmp(interval=3600, expire=1800):
+    """
+    每隔 interval 秒清理 /tmp/ 下超過 expire 秒未修改的圖片
+    interval: 每幾秒檢查一次
+    expire: 超過多久沒被修改就刪掉
+    """
+    while True:
+        try:
+            now = time.time()
+            tmp_path = "/tmp"
+            deleted = 0
+            for f in os.listdir(tmp_path):
+                fp = os.path.join(tmp_path, f)
+                if os.path.isfile(fp) and (now - os.path.getmtime(fp)) > expire:
+                    os.remove(fp)
+                    deleted += 1
+            if deleted:
+                print(f"[clean_tmp] ✅ 已清理 {deleted} 個舊檔案")
+        except Exception as e:
+            print("[clean_tmp] 清理錯誤：", e)
+        time.sleep(interval)
+
+# 啟動背景清理執行緒（在 Flask 啟動前執行）
+threading.Thread(target=clean_tmp, daemon=True).start()
 
 @app.route("/callback", methods=['POST', 'HEAD'])
 def callback():
@@ -75,7 +101,6 @@ def get_or_create_user(user_id):
 
 # === 授權檢查 ===
 def check_user_authorized(event, user):
-    """未授權者直接回覆提示並中斷流程"""
     if not user.get("is_authorized", False):
         safe_reply(
             event,
@@ -143,25 +168,20 @@ def weighted_tie_prediction(user_id):
     res = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
     if not res.data:
         return random.choice(["莊", "閒"]), 50.0, 50.0
-
     results = [r["result"] for r in res.data if r["result"] in ["莊", "閒"]]
     banker_count = results.count("莊")
     player_count = results.count("閒")
     total = banker_count + player_count
     if total == 0:
         return random.choice(["莊", "閒"]), 50.0, 50.0
-
     banker_ratio = banker_count / total
     player_ratio = player_count / total
     avg = (banker_ratio + player_ratio) / 2
-
     banker_weight = 0.5 + (banker_ratio - avg) * 0.6
     player_weight = 0.5 + (player_ratio - avg) * 0.6
-
     total_weight = banker_weight + player_weight
     banker_weight /= total_weight
     player_weight /= total_weight
-
     prediction = random.choices(["莊", "閒"], weights=[banker_weight, player_weight])[0]
     return prediction, round(banker_weight * 100, 1), round(player_weight * 100, 1)
 
@@ -172,11 +192,9 @@ def handle_text(event):
     user_id = event.source.user_id
     user = get_or_create_user(user_id)
 
-    # --- 授權檢查 ---
     if not check_user_authorized(event, user):
         return
 
-    # === 預測流程 ===
     if msg == "開始預測":
         supabase.table("members").update({"prediction_active": True}).eq("line_user_id", user_id).execute()
         safe_reply(event, "✅ 已啟用 AI 預測模式，請上傳房間圖片開始分析。")
@@ -215,7 +233,6 @@ def handle_image(event):
     message_id = event.message.id
     user = get_or_create_user(user_id)
 
-    # --- 授權檢查 ---
     if not check_user_authorized(event, user):
         return
 
