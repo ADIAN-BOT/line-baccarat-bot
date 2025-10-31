@@ -218,11 +218,9 @@ def handle_text(event):
         history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
         results = [r["result"] for r in reversed(history.data)]
         last_result, banker, player, suggestion = predict_from_recent_results(results)
-        pair_weights = predict_pairs(results)
         reply = (
             f"✅ 已記錄：{msg}\n\n"
-            f"🔴 莊勝率：{banker}%\n🔵 閒勝率：{player}%\n📈 下一顆推薦：{suggestion}\n\n"
-            f"🔮 三寶推薦：\n" + "\n".join([f"{k} {v}%" for k,v in pair_weights.items()])
+            f"🔴 莊勝率：{banker}%\n🔵 閒勝率：{player}%\n📈 下一顆推薦：{suggestion}"
         )
         safe_reply(event, reply)
         return
@@ -233,7 +231,10 @@ def handle_text(event):
             f"🟢 和局紀錄完成\n\n"
             f"📊 加權預測：{prediction}\n"
             f"📈 權重：莊 {banker_w}%｜閒 {player_w}%\n\n"
-            f"🔮 三寶推薦：\n" + "\n".join([f"{k} {v}%" for k,v in pair_weights.items()])
+            f"🔮 三寶推薦：\n"
+            f"🔴 莊對 {pair_weights['莊對']}%\n"
+            f"🔵 閒對 {pair_weights['閒對']}%\n"
+            f"🍀 幸運六 {pair_weights['幸運六']}%"
         )
         supabase.table("records").insert({
             "line_user_id": user_id,
@@ -274,13 +275,11 @@ def handle_image(event):
         pred = model.predict_proba(X)[0]
         banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
         suggestion = "莊" if pred[1] >= pred[0] else "閒"
-        pair_weights = predict_pairs(results)
         reply = (
             f"📸 圖像辨識完成\n\n"
             f"🔙 最後一顆：{results[0]}\n"
             f"🔴 莊勝率：{banker}%\n🔵 閒勝率：{player}%\n\n"
-            f"📈 下一顆推薦：{suggestion}\n\n"
-            f"🔮 三寶推薦：\n" + "\n".join([f"{k} {v}%" for k,v in pair_weights.items()])
+            f"📈 下一顆推薦：{suggestion}"
         )
         safe_reply(event, reply)
     except Exception as e:
