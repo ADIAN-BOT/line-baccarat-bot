@@ -98,7 +98,7 @@ def check_user_authorized(event, user):
     if not user.get("is_authorized", False):
         safe_reply(
             event,
-            f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}\n📩 聯絡管理員：https://lin.ee/2ODINSW"
+            f"🔒 尚未授權，請將以下 UID 提供給管理員開通：\n🆔 {user['user_code']}"
         )
         return False
     return True
