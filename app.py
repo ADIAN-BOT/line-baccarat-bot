@@ -245,36 +245,96 @@ def handle_text(event):
         return
     safe_reply(event, "請選擇操作功能 👇")
 
-# === 圖像訊息 ===
+# === 改良版 圖像分析辨識莊/閒 ===
+def detect_last_n_results(image_path, n=24):
+    img = cv2.imread(image_path)
+    if img is None:
+        return []
+
+    # 手機截圖大多為長圖，自動擷取下方 30%（大路圖區）
+    h, w = img.shape[:2]
+    roi = img[int(h * 0.65):h, 0:w]
+
+    # 提高亮度與對比，幫助色彩分離
+    roi = cv2.convertScaleAbs(roi, alpha=1.3, beta=15)
+    roi = cv2.GaussianBlur(roi, (3, 3), 0)
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+    # 紅色範圍（兩段）
+    lower_red1, upper_red1 = np.array([0, 90, 90]), np.array([10, 255, 255])
+    lower_red2, upper_red2 = np.array([160, 90, 90]), np.array([179, 255, 255])
+    mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
+
+    # 藍色範圍
+    lower_blue, upper_blue = np.array([100, 80, 80]), np.array([130, 255, 255])
+    mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
+
+    # 去雜訊
+    kernel = np.ones((3, 3), np.uint8)
+    mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    # 找輪廓
+    contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    circles = []
+    for cnt in contours_red:
+        area = cv2.contourArea(cnt)
+        if area > 80:
+            x, y, w, h = cv2.boundingRect(cnt)
+            circles.append((x + w, "莊"))
+    for cnt in contours_blue:
+        area = cv2.contourArea(cnt)
+        if area > 80:
+            x, y, w, h = cv2.boundingRect(cnt)
+            circles.append((x + w, "閒"))
+
+    # 依 x 座標排序（由右往左）
+    results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
+    return results[:n]
+
+# === 改良版 圖像訊息處理 ===
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event):
     user_id = event.source.user_id
     message_id = event.message.id
     user = get_or_create_user(user_id)
+
     if not check_user_authorized(event, user):
         return
     if not user.get("prediction_active", False):
         safe_reply(event, "⚠️ 請先輸入『開始預測』以啟用分析。")
         return
+
     try:
         image_path = f"/tmp/{message_id}.jpg"
         content = blob_api.get_message_content(message_id)
         with open(image_path, "wb") as f:
             f.write(content)
+
+        # 執行辨識
         results = detect_last_n_results(image_path)
         if not results:
-            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。")
+            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖）。")
             return
+
+        # 寫入資料庫紀錄
         for r in results:
             if r in ["莊", "閒"]:
                 supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
+
+        # AI 預測
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
         while len(feature) < 24:
             feature.insert(0, 1 if random.random() > 0.5 else 0)
         X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
+
         pred = model.predict_proba(X)[0]
         banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
         suggestion = "莊" if pred[1] >= pred[0] else "閒"
+
         reply = (
             f"📸 圖像辨識完成\n\n"
             f"🔙 最後一顆：{results[0]}\n"
@@ -282,8 +342,7 @@ def handle_image(event):
             f"📈 下一顆推薦：{suggestion}"
         )
         safe_reply(event, reply)
+
     except Exception as e:
         print("[處理圖片錯誤]", e)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+        safe_reply(event, "⚠️ 圖像處理過程出錯，請再試一次。")
