@@ -279,7 +279,7 @@ def handle_image(event):
         safe_reply(event, "⚠️ 請先輸入『開始預測』以啟用分析。")
         return
 
-    try:
+   try:
     image_path = f"/tmp/{message_id}.jpg"
     content_response = blob_api.get_message_content(message_id)
     with open(image_path, "wb") as f:
