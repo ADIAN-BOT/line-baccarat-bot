@@ -119,7 +119,7 @@ def predict_pairs(results):
 
 # === 預測邏輯 ===
 def predict_from_recent_results(results):
-    if not results:
+    if not results or model is None:
         return "無", 0.0, 0.0, "無法判斷"
     feature = [1 if r == "莊" else 0 for r in reversed(results)]
     while len(feature) < 24:
@@ -279,18 +279,17 @@ def handle_image(event):
         safe_reply(event, "⚠️ 請先輸入『開始預測』以啟用分析。")
         return
 
-   try:
-    image_path = f"/tmp/{message_id}.jpg"
-    content_response = blob_api.get_message_content(message_id)
-    with open(image_path, "wb") as f:
-        for chunk in content_response.iter_content():
-            f.write(chunk)
+    try:
+        image_path = f"/tmp/{message_id}.jpg"
+        content_response = blob_api.get_message_content(message_id)
+        with open(image_path, "wb") as f:
+            f.write(content_response.read())
 
-    results = detect_last_n_results(image_path)
-    if not results:
-        safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖）。")
-        print("[DEBUG] detect_last_n_results 回傳空值，圖片可能讀取失敗或顏色範圍不符")
-        return
+        results = detect_last_n_results(image_path)
+        if not results:
+            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖）。")
+            print("[DEBUG] detect_last_n_results 回傳空值，圖片可能讀取失敗或顏色範圍不符")
+            return
 
         for r in results:
             if r in ["莊", "閒"]:
@@ -299,6 +298,11 @@ def handle_image(event):
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
         while len(feature) < 24:
             feature.insert(0, 1 if random.random() > 0.5 else 0)
+
+        if model is None:
+            safe_reply(event, "⚠️ 模型尚未載入，無法預測。")
+            return
+
         X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
         pred = model.predict_proba(X)[0]
         banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
