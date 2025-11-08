@@ -280,15 +280,17 @@ def handle_image(event):
         return
 
     try:
-        image_path = f"/tmp/{message_id}.jpg"
-        content = blob_api.get_message_content(message_id)
-        with open(image_path, "wb") as f:
-            f.write(content)
+    image_path = f"/tmp/{message_id}.jpg"
+    content_response = blob_api.get_message_content(message_id)
+    with open(image_path, "wb") as f:
+        for chunk in content_response.iter_content():
+            f.write(chunk)
 
-        results = detect_last_n_results(image_path)
-        if not results:
-            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖）。")
-            return
+    results = detect_last_n_results(image_path)
+    if not results:
+        safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖）。")
+        print("[DEBUG] detect_last_n_results 回傳空值，圖片可能讀取失敗或顏色範圍不符")
+        return
 
         for r in results:
             if r in ["莊", "閒"]:
