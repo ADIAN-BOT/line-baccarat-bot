@@ -227,13 +227,32 @@ def handle_text(event):
 
     safe_reply(event, "請選擇操作功能 👇")
 
-# === 改良版 圖像辨識 ===
+# === 改良版 圖像辨識（含容錯裁切 & 翻轉） ===
 def detect_last_n_results(image_path, n=24):
     img = cv2.imread(image_path)
     if img is None:
         return []
+
     h, w = img.shape[:2]
-    roi = img[int(h * 0.65):h, 0:w]
+
+    # 嘗試多個 ROI 範圍 (65%~100%、60%~100%、70%~100%)
+    roi_ranges = [(0.65, 1.0), (0.6, 1.0), (0.7, 1.0)]
+    for start_ratio, end_ratio in roi_ranges:
+        roi = img[int(h * start_ratio):int(h * end_ratio), 0:w]
+        results = detect_colors_in_roi(roi)
+        if results:
+            return results[:n]
+
+        # 嘗試左右翻轉
+        roi_flipped = cv2.flip(roi, 1)
+        results = detect_colors_in_roi(roi_flipped)
+        if results:
+            return results[:n]
+
+    return []
+
+# === ROI 顏色偵測函式 ===
+def detect_colors_in_roi(roi):
     roi = cv2.convertScaleAbs(roi, alpha=1.3, beta=15)
     roi = cv2.GaussianBlur(roi, (3, 3), 0)
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
@@ -253,18 +272,17 @@ def detect_last_n_results(image_path, n=24):
 
     circles = []
     for cnt in contours_red:
-        area = cv2.contourArea(cnt)
-        if area > 80:
+        if cv2.contourArea(cnt) > 80:
             x, y, w, h = cv2.boundingRect(cnt)
             circles.append((x + w, "莊"))
     for cnt in contours_blue:
-        area = cv2.contourArea(cnt)
-        if area > 80:
+        if cv2.contourArea(cnt) > 80:
             x, y, w, h = cv2.boundingRect(cnt)
             circles.append((x + w, "閒"))
 
+    # 依 X 軸位置從右到左排序
     results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
-    return results[:n]
+    return results
 
 # === 圖像訊息處理 ===
 @handler.add(MessageEvent, message=ImageMessageContent)
