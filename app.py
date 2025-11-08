@@ -45,7 +45,7 @@ blob_api = MessagingApiBlob(api_client)
 # === Flask App ===
 app = Flask(__name__)
 
-# === 自動清理 /tmp/ ===
+# === 背景清理 /tmp/ 圖片 ===
 def clean_tmp(interval=3600, expire=1800):
     while True:
         try:
@@ -65,6 +65,11 @@ def clean_tmp(interval=3600, expire=1800):
 
 threading.Thread(target=clean_tmp, daemon=True).start()
 
+# === 非同步資料庫寫入 ===
+def async_db_write(func, *args, **kwargs):
+    threading.Thread(target=lambda: func(*args, **kwargs), daemon=True).start()
+
+# === Flask callback ===
 @app.route("/callback", methods=['POST', 'HEAD'])
 def callback():
     if request.method == 'HEAD':
@@ -90,7 +95,7 @@ def get_or_create_user(user_id):
         "is_authorized": False,
         "prediction_active": False
     }
-    supabase.table("members").insert(new_user).execute()
+    async_db_write(supabase.table("members").insert, new_user)
     return new_user
 
 # === 授權檢查 ===
@@ -102,56 +107,6 @@ def check_user_authorized(event, user):
         )
         return False
     return True
-
-# === 圖像分析辨識前 N 顆莊或閒 ===
-def detect_last_n_results(image_path, n=24):
-    img = cv2.imread(image_path)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lower_red1 = np.array([0, 100, 100])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([160, 100, 100])
-    upper_red2 = np.array([179, 255, 255])
-    mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
-    lower_blue = np.array([100, 100, 100])
-    upper_blue = np.array([130, 255, 255])
-    mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
-    contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    red_circles = [(cv2.boundingRect(cnt), '莊') for cnt in contours_red if cv2.contourArea(cnt) > 100]
-    contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    blue_circles = [(cv2.boundingRect(cnt), '閒') for cnt in contours_blue if cv2.contourArea(cnt) > 100]
-    all_circles = [(x+w, res) for ((x, y, w, h), res) in red_circles + blue_circles]
-    sorted_results = [r for _, r in sorted(all_circles, key=lambda t: -t[0])]
-    return sorted_results[:n]
-
-# === 三寶加權邏輯 ===
-def predict_pairs(results):
-    banker_count = results.count("莊")
-    player_count = results.count("閒")
-    total = banker_count + player_count or 1
-    banker_ratio = banker_count / total
-    player_ratio = player_count / total
-    pair_weights = {
-        "莊對": 0.33 + (banker_ratio - 0.5) * 0.2,
-        "閒對": 0.33 + (player_ratio - 0.5) * 0.2,
-        "幸運六": 0.34
-    }
-    total_w = sum(pair_weights.values())
-    for k in pair_weights:
-        pair_weights[k] = round(pair_weights[k] / total_w * 100, 1)
-    return pair_weights
-
-# === 預測邏輯 ===
-def predict_from_recent_results(results):
-    if not results:
-        return "無", 0.0, 0.0, "無法判斷"
-    feature = [1 if r == "莊" else 0 for r in reversed(results)]
-    while len(feature) < 24:
-        feature.insert(0, 1 if random.random() > 0.5 else 0)
-    X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
-    pred = model.predict_proba(X)[0]
-    banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
-    suggestion = "莊" if pred[1] >= pred[0] else "閒"
-    return results[0], banker, player, suggestion
 
 # === 快速回覆 ===
 def get_quick_reply():
@@ -173,7 +128,35 @@ def safe_reply(event, text):
     except Exception as e:
         print("[Error] Reply Message Failed:", e)
 
-# === 和局加權預測（含三寶） ===
+# === 預測輔助函式 ===
+def predict_pairs(results):
+    banker_count = results.count("莊")
+    player_count = results.count("閒")
+    total = banker_count + player_count or 1
+    banker_ratio = banker_count / total
+    player_ratio = player_count / total
+    pair_weights = {
+        "莊對": 0.33 + (banker_ratio - 0.5) * 0.2,
+        "閒對": 0.33 + (player_ratio - 0.5) * 0.2,
+        "幸運六": 0.34
+    }
+    total_w = sum(pair_weights.values())
+    for k in pair_weights:
+        pair_weights[k] = round(pair_weights[k] / total_w * 100, 1)
+    return pair_weights
+
+def predict_from_recent_results(results):
+    if not results:
+        return "無", 0.0, 0.0, "無法判斷"
+    feature = [1 if r == "莊" else 0 for r in reversed(results)]
+    while len(feature) < 24:
+        feature.insert(0, 1 if random.random() > 0.5 else 0)
+    X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
+    pred = model.predict_proba(X)[0]
+    banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
+    suggestion = "莊" if pred[1] >= pred[0] else "閒"
+    return results[0], banker, player, suggestion
+
 def weighted_tie_prediction(user_id):
     res = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
     results = [r["result"] for r in res.data if r["result"] in ["莊", "閒"]]
@@ -196,7 +179,7 @@ def weighted_tie_prediction(user_id):
     pair_weights = predict_pairs(results)
     return prediction, round(banker_weight*100, 1), round(player_weight*100, 1), pair_weights
 
-# === 文字訊息 ===
+# === 文字事件處理 ===
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text(event):
     msg = event.message.text.strip()
@@ -206,15 +189,15 @@ def handle_text(event):
         return
 
     if msg == "開始預測":
-        supabase.table("members").update({"prediction_active": True}).eq("line_user_id", user_id).execute()
+        async_db_write(supabase.table("members").update, {"prediction_active": True}, dict(eq=("line_user_id", user_id)))
         safe_reply(event, "✅ 已啟用 AI 預測模式，請上傳房間圖片開始分析。")
         return
     if msg == "停止分析":
-        supabase.table("members").update({"prediction_active": False}).eq("line_user_id", user_id).execute()
+        async_db_write(supabase.table("members").update, {"prediction_active": False}, dict(eq=("line_user_id", user_id)))
         safe_reply(event, "🛑 AI 分析已結束。若要重新開始請輸入『開始預測』。")
         return
     if msg in ["莊", "閒"]:
-        supabase.table("records").insert({"line_user_id": user_id, "result": msg}).execute()
+        async_db_write(supabase.table("records").insert, {"line_user_id": user_id, "result": msg})
         history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
         results = [r["result"] for r in reversed(history.data)]
         last_result, banker, player, suggestion = predict_from_recent_results(results)
@@ -225,7 +208,7 @@ def handle_text(event):
         safe_reply(event, reply)
         return
     if msg == "和局":
-        supabase.table("records").insert({"line_user_id": user_id, "result": "和"}).execute()
+        async_db_write(supabase.table("records").insert, {"line_user_id": user_id, "result": "和"})
         prediction, banker_w, player_w, pair_weights = weighted_tie_prediction(user_id)
         reply = (
             f"🟢 和局紀錄完成\n\n"
@@ -236,66 +219,56 @@ def handle_text(event):
             f"🔵 閒對 {pair_weights['閒對']}%\n"
             f"🍀 幸運六 {pair_weights['幸運六']}%"
         )
-        supabase.table("records").insert({
+        async_db_write(supabase.table("records").insert, {
             "line_user_id": user_id,
             "result": "和局預測",
             "pair_prediction": str(pair_weights)
-        }).execute()
+        })
         safe_reply(event, reply)
         return
     safe_reply(event, "請選擇操作功能 👇")
 
-# === 改良版 圖像分析辨識莊/閒 ===
+# === 圖像辨識改良版 ===
 def detect_last_n_results(image_path, n=24):
     img = cv2.imread(image_path)
     if img is None:
         return []
 
-    # 手機截圖大多為長圖，自動擷取下方 30%（大路圖區）
     h, w = img.shape[:2]
     roi = img[int(h * 0.65):h, 0:w]
-
-    # 提高亮度與對比，幫助色彩分離
     roi = cv2.convertScaleAbs(roi, alpha=1.3, beta=15)
     roi = cv2.GaussianBlur(roi, (3, 3), 0)
 
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-    # 紅色範圍（兩段）
     lower_red1, upper_red1 = np.array([0, 90, 90]), np.array([10, 255, 255])
     lower_red2, upper_red2 = np.array([160, 90, 90]), np.array([179, 255, 255])
     mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
 
-    # 藍色範圍
     lower_blue, upper_blue = np.array([100, 80, 80]), np.array([130, 255, 255])
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
 
-    # 去雜訊
     kernel = np.ones((3, 3), np.uint8)
     mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_OPEN, kernel, iterations=1)
     mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_OPEN, kernel, iterations=1)
 
-    # 找輪廓
     contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     circles = []
     for cnt in contours_red:
-        area = cv2.contourArea(cnt)
-        if area > 80:
+        if cv2.contourArea(cnt) > 80:
             x, y, w, h = cv2.boundingRect(cnt)
             circles.append((x + w, "莊"))
     for cnt in contours_blue:
-        area = cv2.contourArea(cnt)
-        if area > 80:
+        if cv2.contourArea(cnt) > 80:
             x, y, w, h = cv2.boundingRect(cnt)
             circles.append((x + w, "閒"))
 
-    # 依 x 座標排序（由右往左）
     results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
     return results[:n]
 
-# === 改良版 圖像訊息處理 ===
+# === 圖像事件處理 ===
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event):
     user_id = event.source.user_id
@@ -314,16 +287,15 @@ def handle_image(event):
         with open(image_path, "wb") as f:
             f.write(content)
 
-        # 執行辨識
         results = detect_last_n_results(image_path)
         if not results:
             safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖）。")
             return
 
-        # 寫入資料庫紀錄
+        # 非同步寫入紀錄
         for r in results:
             if r in ["莊", "閒"]:
-                supabase.table("records").insert({"line_user_id": user_id, "result": r}).execute()
+                async_db_write(supabase.table("records").insert, {"line_user_id": user_id, "result": r})
 
         # AI 預測
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
@@ -346,3 +318,6 @@ def handle_image(event):
     except Exception as e:
         print("[處理圖片錯誤]", e)
         safe_reply(event, "⚠️ 圖像處理過程出錯，請再試一次。")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
