@@ -301,51 +301,77 @@ def handle_text(event):
 
 # === 改良版 圖像辨識（針對手機長截圖）===
 def detect_last_n_results(image_path, n=24):
+    import cv2, numpy as np
+
     img = cv2.imread(image_path)
     if img is None:
+        print("❌ 無法讀取圖片")
         return []
 
-    # 手機截圖長圖：截下底部大路圖區域（約 65% ~ 100%）
     h, w = img.shape[:2]
-    roi = img[int(h * 0.65):h, 0:w]
 
-    # 提高對比、去噪，幫助色彩分離
-    roi = cv2.convertScaleAbs(roi, alpha=1.3, beta=15)
+    # 改為中下段區域
+    roi = img[int(h * 0.45):h, 0:w]
+
+    # 亮度與銳化
+    roi = cv2.convertScaleAbs(roi, alpha=1.4, beta=25)
     roi = cv2.GaussianBlur(roi, (3, 3), 0)
 
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-    # 紅色與藍色範圍（可依實拍微調）
-    lower_red1, upper_red1 = np.array([0, 90, 90]), np.array([10, 255, 255])
-    lower_red2, upper_red2 = np.array([160, 90, 90]), np.array([179, 255, 255])
-    mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
+    # === 顏色範圍（更寬鬆）===
+    lower_red1, upper_red1 = np.array([0, 70, 70]), np.array([15, 255, 255])
+    lower_red2, upper_red2 = np.array([160, 70, 70]), np.array([179, 255, 255])
+    lower_blue, upper_blue = np.array([90, 50, 50]), np.array([140, 255, 255])
 
-    lower_blue, upper_blue = np.array([100, 80, 80]), np.array([130, 255, 255])
+    mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
 
-    # 開運算子去雜訊
+    # 開運算去雜點
     kernel = np.ones((3, 3), np.uint8)
-    mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_OPEN, kernel, iterations=2)
+    mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_OPEN, kernel, iterations=2)
 
-    # 找輪廓
+    # 輪廓
     contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     circles = []
-    for cnt in contours_red:
-        area = cv2.contourArea(cnt)
-        if area > 80:
-            x, y, w_box, h_box = cv2.boundingRect(cnt)
-            circles.append((x + w_box, "莊"))
-    for cnt in contours_blue:
-        area = cv2.contourArea(cnt)
-        if area > 80:
-            x, y, w_box, h_box = cv2.boundingRect(cnt)
-            circles.append((x + w_box, "閒"))
+    red_cnt, blue_cnt = 0, 0
 
-    # 依 x 座標從右往左排序（最近一顆在右側）
+    for cnt in contours_red:
+        if cv2.contourArea(cnt) > 40:   # 降低閾值
+            x, y, w_, h_ = cv2.boundingRect(cnt)
+            circles.append((x + w_, "莊"))
+            red_cnt += 1
+    for cnt in contours_blue:
+        if cv2.contourArea(cnt) > 40:
+            x, y, w_, h_ = cv2.boundingRect(cnt)
+            circles.append((x + w_, "閒"))
+            blue_cnt += 1
+
+    # 若沒抓到，嘗試再寬鬆一點
+    if red_cnt == 0 and blue_cnt == 0:
+        print("⚠️ 未偵測到紅藍，嘗試調整 HSV 範圍")
+        lower_red1, upper_red1 = np.array([0, 50, 50]), np.array([20, 255, 255])
+        lower_red2, upper_red2 = np.array([160, 50, 50]), np.array([179, 255, 255])
+        lower_blue, upper_blue = np.array([80, 40, 40]), np.array([150, 255, 255])
+        mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
+        mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
+        contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours_red:
+            if cv2.contourArea(cnt) > 30:
+                x, y, w_, h_ = cv2.boundingRect(cnt)
+                circles.append((x + w_, "莊"))
+        for cnt in contours_blue:
+            if cv2.contourArea(cnt) > 30:
+                x, y, w_, h_ = cv2.boundingRect(cnt)
+                circles.append((x + w_, "閒"))
+
     results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
+
+    print(f"🔍 偵測結果：莊={red_cnt} 閒={blue_cnt}，總計={len(results)}")
     return results[:n]
 
 # === 圖像事件處理（使用改良版辨識）===
