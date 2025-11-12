@@ -367,6 +367,14 @@ def detect_last_n_results(image_path, n=24):
                 x, y, w_box, h_box = cv2.boundingRect(cnt)
                 circles.append((x + w_box // 2, "莊"))
         results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
+    # === Debug 標註區 ===
+    debug_path = image_path.replace(".jpg", "_debug.jpg")
+    debug_img = roi.copy()
+    for x, result in circles:
+        color = (0, 0, 255) if result == "莊" else (255, 0, 0)
+        cv2.circle(debug_img, (x, int(roi.shape[0] / 2)), 10, color, 2)
+    cv2.imwrite(debug_path, debug_img)
+    print(f"[debug] 已輸出標註圖：{debug_path}")
 
     return results[:n]
 
@@ -386,6 +394,8 @@ def handle_image(event):
     try:
         image_path = f"/tmp/{message_id}.jpg"
         content = blob_api.get_message_content(message_id)
+        if hasattr(content, "iter_content"):
+            content = b"".join(content.iter_content())
         with open(image_path, "wb") as f:
             f.write(content)
 
@@ -434,4 +444,4 @@ def handle_image(event):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
