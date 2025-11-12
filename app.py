@@ -366,16 +366,20 @@ def detect_last_n_results(image_path, n=24):
             if area > 60:
                 x, y, w_box, h_box = cv2.boundingRect(cnt)
                 circles.append((x + w_box // 2, "莊"))
-        results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
+        results = [r for _, r in sorted(circles, key=lambda t: -t[0])]    
     # === Debug 標註區 ===
-    debug_path = image_path.replace(".jpg", "_debug.jpg")
+    import os  # 確保有引入 os 模組
+    base, ext = os.path.splitext(image_path)   # 自動抓出副檔名（.jpg/.png）
+    debug_path = f"{base}_debug{ext}"          # 產生對應副檔名的 debug 圖
+
     debug_img = roi.copy()
     for x, result in circles:
         color = (0, 0, 255) if result == "莊" else (255, 0, 0)
         cv2.circle(debug_img, (x, int(roi.shape[0] / 2)), 10, color, 2)
+
     cv2.imwrite(debug_path, debug_img)
     print(f"[debug] 已輸出標註圖：{debug_path}")
-
+    print("[detect_last_n_results] 辨識結果：", results[:n])
     return results[:n]
 
 # === 圖像事件處理（使用改良版辨識）===
