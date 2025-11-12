@@ -299,53 +299,75 @@ def handle_text(event):
 
     safe_reply(event, "請選擇操作功能 👇")
 
-# === 改良版 圖像辨識（針對手機長截圖）===
+# === 改良版 圖像辨識（雙紅色區間 + 飽和度穩定 + 手機長圖專用）===
 def detect_last_n_results(image_path, n=24):
     img = cv2.imread(image_path)
     if img is None:
         return []
 
-    # 手機截圖長圖：截下底部大路圖區域（約 65% ~ 100%）
+    # 手機長截圖：擷取底部大路圖區域（約 60% ~ 100%）
     h, w = img.shape[:2]
-    roi = img[int(h * 0.65):h, 0:w]
+    roi = img[int(h * 0.6):h, 0:w]
 
-    # 提高對比、去噪，幫助色彩分離
-    roi = cv2.convertScaleAbs(roi, alpha=1.3, beta=15)
+    # 強化對比 + 降噪（針對手機亮度差異）
+    roi = cv2.convertScaleAbs(roi, alpha=1.4, beta=20)
     roi = cv2.GaussianBlur(roi, (3, 3), 0)
 
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-    # 紅色與藍色範圍（可依實拍微調）
-    lower_red1, upper_red1 = np.array([0, 90, 90]), np.array([10, 255, 255])
-    lower_red2, upper_red2 = np.array([160, 90, 90]), np.array([179, 255, 255])
-    mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
+    # ✅ 紅色分兩段（完整抓取亮紅＋暗紅）
+    lower_red1 = np.array([0, 100, 100])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([170, 100, 100])
+    upper_red2 = np.array([180, 255, 255])
 
-    lower_blue, upper_blue = np.array([100, 80, 80]), np.array([130, 255, 255])
+    mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    mask_red = cv2.bitwise_or(mask_red1, mask_red2)
+
+    # ✅ 藍色範圍（涵蓋亮藍～深藍）
+    lower_blue = np.array([90, 100, 80])
+    upper_blue = np.array([130, 255, 255])
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
 
-    # 開運算子去雜訊
+    # ✅ 形態學操作（修補圓圈破碎、濾除雜點）
     kernel = np.ones((3, 3), np.uint8)
-    mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-    # 找輪廓
+    # 找出紅藍圓位置
     contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     circles = []
     for cnt in contours_red:
         area = cv2.contourArea(cnt)
-        if area > 80:
+        if area > 60:  # 最小面積濾掉雜點
             x, y, w_box, h_box = cv2.boundingRect(cnt)
-            circles.append((x + w_box, "莊"))
+            circles.append((x + w_box // 2, "莊"))
+
     for cnt in contours_blue:
         area = cv2.contourArea(cnt)
-        if area > 80:
+        if area > 60:
             x, y, w_box, h_box = cv2.boundingRect(cnt)
-            circles.append((x + w_box, "閒"))
+            circles.append((x + w_box // 2, "閒"))
 
-    # 依 x 座標從右往左排序（最近一顆在右側）
+    # 依 x 座標由右至左（越右邊越新）
     results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
+
+    # 若沒辨識出任何紅色，代表紅閾值可能太嚴，可自動補強一次偏亮紅區
+    if not any(r == "莊" for r in results):
+        lower_red_bright = np.array([0, 70, 180])
+        upper_red_bright = np.array([10, 255, 255])
+        mask_red_bright = cv2.inRange(hsv, lower_red_bright, upper_red_bright)
+        contours_red2, _ = cv2.findContours(mask_red_bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours_red2:
+            area = cv2.contourArea(cnt)
+            if area > 60:
+                x, y, w_box, h_box = cv2.boundingRect(cnt)
+                circles.append((x + w_box // 2, "莊"))
+        results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
+
     return results[:n]
 
 # === 圖像事件處理（使用改良版辨識）===
