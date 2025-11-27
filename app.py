@@ -304,7 +304,7 @@ def handle_text(event):
     safe_reply(event, "請選擇操作功能 👇")
 
 # =========================================================================
-# === 【V2.2 圖像辨識優化版】 多模式適應 (電腦路單 / 手機長截圖) ===
+# === 【V2.3 圖像辨識優化版】 多模式適應 (電腦路單 / 手機長截圖，提升手機適應性) ===
 # =========================================================================
 def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
     img = cv2.imread(image_path)
@@ -315,41 +315,110 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
 
     # --- 1. 根據類型設定 ROI 和過濾參數 ---
     if is_long_mobile_screenshot:
-        # 📱 手機長截圖模式：ROI 在底部，需要排除上方 UI 雜訊 (如數字17)
-        print("[Detect Mode] 📱 手機長截圖模式 (底部 ROI)")
-        # 【修正點 1：將 y_start 從 0.75 提高到 0.80，排除上方的 UI 元素】
-        y_start = int(h * 0.80) 
-        y_end = int(h * 0.95)   
+        print("[Detect Mode] 📱 手機長截圖模式 (動態底部 ROI)")
+        
+        # 【主要修正點 1：動態尋找大路圖上邊界】
+        # 從圖片底部向上找，尋找可能是大路圖底部的白色/淺色背景區域
+        # 這裡我們嘗試找一個較為一致的灰色/白色橫條作為大路圖的下邊緣錨點
+        # 然後向上推斷大路圖的區域
+        
+        # 灰度化並模糊
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        # 尋找水平邊緣，特別是淺色區域的過渡
+        sobelx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=5)
+        sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=5)
+        gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
+        
+        # 嘗試尋找大路圖的底部邊界 (通常會是比較清晰的水平線，顏色也較淺)
+        # 我們會從底部向上掃描，尋找亮度較高且梯度變化較大的區域
+        # 暫時使用一個經驗值，確保不會超過圖片的高度
+        y_start_dynamic = int(h * 0.70) # 預設從 70% 高度開始往上找
+        y_end_dynamic = int(h * 0.98)   # 大路圖通常不會到最底部
+
+        # 這裡的策略是找到大路圖上邊緣，我們知道大路圖通常是長方形
+        # 假設大路圖的背景顏色會比較一致，且上方會是比較複雜的 UI
+        
+        # 重新評估 ROI 區域
+        # 根據您提供的截圖，大路圖的頂部大概在畫面高度的 75% - 85% 之間
+        # 為了避免誤判上方複雜UI，我們將 ROI 範圍限制在畫面的中下部
+        # 並嘗試在該區域內找到最大的「網格狀」區域
+
+        # 嘗試從底部向上尋找大路圖的頂部邊界
+        # 我們假設大路圖是一個相對較為乾淨的網格區域
+        
+        # 初始設定一個較大的候選 ROI
+        candidate_roi_top = int(h * 0.6)
+        candidate_roi_bottom = int(h * 0.98)
+        
+        # 嘗試尋找一個主要的大路圖區域 (簡單方法：找最多圓圈的垂直分佈)
+        # 先用一個較寬鬆的 ROI 找出所有可能的圓圈，然後根據圓圈的 Y 座標分佈來確定大路圖的實際 ROI
+        temp_roi = img[candidate_roi_top:candidate_roi_bottom, 0:w]
+        temp_hsv = cv2.cvtColor(temp_roi, cv2.COLOR_BGR2HSV)
+        
+        temp_mask_red1 = cv2.inRange(temp_hsv, np.array([0, 100, 100]), np.array([10, 255, 255]))
+        temp_mask_red2 = cv2.inRange(temp_hsv, np.array([170, 100, 100]), np.array([180, 255, 255]))
+        temp_mask_red = cv2.bitwise_or(temp_mask_red1, temp_mask_red2)
+        temp_mask_blue = cv2.inRange(temp_hsv, np.array([90, 100, 80]), np.array([130, 255, 255]))
+        
+        temp_mask_red = cv2.morphologyEx(temp_mask_red, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
+        temp_mask_blue = cv2.morphologyEx(temp_mask_blue, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=2)
+        
+        temp_contours_red, _ = cv2.findContours(temp_mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        temp_contours_blue, _ = cv2.findContours(temp_mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        all_possible_circles_y = []
+        for cnt in temp_contours_red + temp_contours_blue:
+            x, y, w_box, h_box = cv2.boundingRect(cnt)
+            area = cv2.contourArea(cnt)
+            if 50 < area < 800 and max(w_box/h_box, h_box/w_box) < 2.0: # 寬鬆的過濾
+                all_possible_circles_y.append(candidate_roi_top + y + h_box // 2) # 轉換回原始圖片的 Y 座標
+        
+        if all_possible_circles_y:
+            # 找到 Y 座標分佈的眾數或密集區，作為大路圖的中心
+            # 簡化處理：取最上面的幾個點的平均 Y 座標，再稍微向下調整作為 ROI 的頂部
+            sorted_y = sorted(all_possible_circles_y)
+            # 取最上面的 20% 點的平均 Y 座標，作為大路圖的有效頂部
+            effective_top_y = int(np.mean(sorted_y[:max(1, int(len(sorted_y)*0.2))]))
+            
+            # 從找到的有效頂部再向上偏移一點，作為 ROI 的 y_start
+            # 避免剛好切到最上面一排圓圈
+            y_start = max(int(effective_top_y - (h * 0.05)), int(h * 0.6)) # 確保不超過畫面 60%
+            y_end = int(h * 0.98) # 延伸到幾乎底部
+            print(f"[Dynamic ROI] Detected effective_top_y: {effective_top_y}, setting y_start: {y_start}")
+        else:
+            # 如果動態偵測失敗，退回使用經驗值
+            y_start = int(h * 0.75) # 回歸到上次測試前的一個比較保守的值
+            y_end = int(h * 0.95)   
+            print("[Dynamic ROI] No circles found in candidate ROI, using default y_start.")
+
         roi = img[y_start:y_end, 0:w]
-        # 【修正點 2：將 MIN_AREA_THRESHOLD 從 50 提高到 70，排除微小雜訊】
         MIN_AREA_THRESHOLD = 70   
         MAX_AREA_THRESHOLD = 800
         MAX_Y_LIMIT = roi.shape[0] # Y 軸不做進一步限制
         
     else:
-        # 💻 電腦路單模式：ROI 涵蓋整個路單，需要嚴格的面積和 Y 座標過濾
+        # 💻 電腦路單模式：保持不變
         print("[Detect Mode] 💻 電腦路單模式 (頂部 Y 限制)")
-        y_start = 0
-        roi = img[0:h, 0:w] # 整個圖片作為 ROI
+        y_start = 0 # 電腦模式的 roi 從 0 開始，所以 y_start 為 0
+        roi = img[0:h, 0:w] 
         MIN_AREA_THRESHOLD = 150  
         MAX_AREA_THRESHOLD = 800  
-        MAX_Y_LIMIT = int(h * 0.3) # Y 軸只允許前 30% 高度
+        MAX_Y_LIMIT = int(h * 0.3) 
 
     # 如果 ROI 擷取失敗 (高度過小)，則使用原始全圖或預設
     if roi.shape[0] < 50:
         print("[Detect Mode] ROI 擷取失敗，使用全圖")
-        y_start = 0
+        y_start = 0 # 使用全圖時，roi 的 y_start 是 0
         roi = img[0:h, 0:w]
         if not is_long_mobile_screenshot:
-            # 如果是電腦圖但 ROI 失敗，且使用全圖，重新設定 Y 軸限制
-             MAX_Y_LIMIT = int(h * 0.3) 
+            MAX_Y_LIMIT = int(h * 0.3) 
 
 
     # --- 2. 圖像預處理 ---
-    roi = cv2.convertScaleAbs(roi, alpha=1.4, beta=20)
-    roi = cv2.GaussianBlur(roi, (3, 3), 0)
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
+    roi_hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV) # 更改變數名稱避免混淆
+    
     # ... (顏色遮罩邏輯保持不變) ...
     lower_red1 = np.array([0, 100, 100])
     upper_red1 = np.array([10, 255, 255])
@@ -358,10 +427,10 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
     lower_blue = np.array([90, 100, 80])
     upper_blue = np.array([130, 255, 255])
 
-    mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    mask_red1 = cv2.inRange(roi_hsv, lower_red1, upper_red1)
+    mask_red2 = cv2.inRange(roi_hsv, lower_red2, upper_red2)
     mask_red = cv2.bitwise_or(mask_red1, mask_red2)
-    mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
+    mask_blue = cv2.inRange(roi_hsv, lower_blue, upper_blue)
 
     # 形態學操作
     kernel = np.ones((3, 3), np.uint8)
@@ -373,7 +442,8 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
     contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     circles = []
-    MAX_ASPECT_RATIO = 1.8 # 限制長寬比，排除長條狀雜訊 (如數字)
+    MAX_ASPECT_RATIO = 1.5 # 【修正點：將長寬比限制更嚴格，排除非圓形的雜訊】
+    MIN_CIRCULARITY = 0.6 # 【新增：圓度過濾，排除方形或其他形狀的 UI 元素】
 
     def filter_and_append_circles(contours, result_type):
         for cnt in contours:
@@ -386,13 +456,18 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
                 if h_box == 0 or w_box == 0: continue
                 aspect_ratio = max(w_box / h_box, h_box / w_box)
                 
-                # 3. Y 軸位置過濾 (僅對電腦路單模式有意義)
+                # 3. 圓度過濾：確保是圓形
+                perimeter = cv2.arcLength(cnt, True)
+                circularity = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
+                
+                # 4. Y 軸位置過濾 (僅對電腦路單模式有意義，但手機模式的 ROI 已經處理了)
                 if not is_long_mobile_screenshot:
                     # 注意：y 是相對 ROI (全圖) 的座標
                     if (y + h_box // 2) > MAX_Y_LIMIT:
-                        continue # 排除路單下方的點
+                        continue 
 
-                if aspect_ratio < MAX_ASPECT_RATIO:
+                # 綜合過濾條件
+                if aspect_ratio < MAX_ASPECT_RATIO and circularity > MIN_CIRCULARITY:
                     center_x = x + w_box // 2
                     circles.append((center_x, result_type))
 
@@ -404,7 +479,7 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
         print("[Detect] 嘗試紅色補強...")
         lower_red_bright = np.array([0, 70, 180])
         upper_red_bright = np.array([10, 255, 255])
-        mask_red_bright = cv2.inRange(hsv, lower_red_bright, upper_red_bright)
+        mask_red_bright = cv2.inRange(roi_hsv, lower_red_bright, upper_red_bright) # 使用 roi_hsv
         
         contours_red_bright, _ = cv2.findContours(mask_red_bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         filter_and_append_circles(contours_red_bright, "莊") 
@@ -419,10 +494,24 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
     
     for x, result in circles:
         color = (0, 0, 255) if result == "莊" else (255, 0, 0)
-        cv2.circle(debug_img, (x, int(roi.shape[0] / 2)), 10, color, 2)
+        cv2.circle(debug_img, (x, y_start + int(roi.shape[0] / 2)), 10, color, 2) # debug 圓圈位置需考慮 y_start
+        # 為了更準確的 debug，我們可以在 ROI 上繪製
+        # cv2.circle(debug_img, (x, y), 10, color, 2) # x, y 已經是 ROI 內座標
 
-    cv2.imwrite(debug_path, debug_img)
-    print(f"[debug] ✅ 已輸出標註圖：{debug_path}")
+    # 繪製 ROI 邊界在原圖上 (用於更直觀地查看 ROI 是否正確)
+    original_debug_img = img.copy()
+    cv2.rectangle(original_debug_img, (0, y_start), (w, y_end), (0, 255, 0), 2) # 綠色框表示 ROI
+    for x, result in circles:
+        # 將圓圈座標從 ROI 空間轉換回原始圖片空間
+        color = (0, 0, 255) if result == "莊" else (255, 0, 0)
+        # x 是 ROI 內的 x，y 是原始 ROI 的頂部 Y 加上 ROI 內圓圈的 Y 偏移
+        # 這裡我們需要知道每個圓圈在 ROI 內的實際 Y 座標
+        # 由於 filter_and_append_circles 函式只傳回中心 X，我們需要重新計算 Y
+        # 為了簡化，我們可以在 ROI 的中心繪製這些點
+        cv2.circle(original_debug_img, (x, int(y_start + roi.shape[0]/2)), 10, color, 2)
+
+    cv2.imwrite(debug_path, original_debug_img) # 輸出帶有 ROI 框和圓圈的原始圖片
+    print(f"[debug] ✅ 已輸出標註圖 (包含 ROI 框)：{debug_path}")
     print("[detect_last_n_results] 辨識結果：", results[:n])
     return results[:n]
 
@@ -452,14 +541,12 @@ def handle_image(event):
         h, w = temp_img.shape[:2]
         
         # 【重要：圖片類型判斷】
-        # 判斷是手機長截圖還是電腦路單圖：若圖片高度是寬度的 1.5 倍以上，則視為手機長截圖
         aspect_ratio = h / w
         is_long_mobile_screenshot = (aspect_ratio >= 1.5) 
         
         results = detect_last_n_results(image_path, is_long_mobile_screenshot=is_long_mobile_screenshot)
         
         if not results:
-            # 辨識失敗時，直接回傳錯誤訊息並結束
             print("❌ 圖像辨識結果為空！")
             safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖或確保大路圖區塊清楚）。")
             return
@@ -471,7 +558,6 @@ def handle_image(event):
 
         # AI 預測（同步，因為要產生回覆）
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
-        # 優化：不足 24 筆時，填充中性值 (0)
         while len(feature) < 24:
             feature.insert(0, 0)
             
@@ -502,7 +588,6 @@ def handle_image(event):
 
     except Exception as e:
         print("[處理圖片錯誤]", e)
-        # 避免程式碼崩潰導致無回覆，這裡捕獲所有錯誤並回覆
         safe_reply(event, "⚠️ 圖像處理過程出錯，請再試一次。")
 
 if __name__ == "__main__":
