@@ -304,7 +304,7 @@ def handle_text(event):
     safe_reply(event, "請選擇操作功能 👇")
 
 # =========================================================================
-# === 【V2.0 圖像辨識優化版】 多模式適應 (電腦路單 / 手機長截圖) ===
+# === 【V2.1 圖像辨識優化版】 多模式適應 (電腦路單 / 手機長截圖) ===
 # =========================================================================
 def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
     img = cv2.imread(image_path)
@@ -315,7 +315,7 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
 
     # --- 1. 根據類型設定 ROI 和過濾參數 ---
     if is_long_mobile_screenshot:
-        # 手機長截圖模式：ROI 在底部，需要排除上方 UI 雜訊 (如數字17)
+        # 📱 手機長截圖模式：ROI 在底部，需要排除上方 UI 雜訊 (如數字17)
         print("[Detect Mode] 📱 手機長截圖模式 (底部 ROI)")
         y_start = int(h * 0.75) # 從 75% 高度開始
         y_end = int(h * 0.95)   # 到 95% 高度結束
@@ -325,17 +325,22 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
         MAX_Y_LIMIT = roi.shape[0] # Y 軸不做進一步限制
         
     else:
-        # 電腦路單模式：ROI 涵蓋整個路單，需要嚴格的面積和 Y 座標過濾
+        # 💻 電腦路單模式：ROI 涵蓋整個路單，需要嚴格的面積和 Y 座標過濾
         print("[Detect Mode] 💻 電腦路單模式 (頂部 Y 限制)")
         roi = img[0:h, 0:w] # 整個圖片作為 ROI
-        MIN_AREA_THRESHOLD = 400  # 電腦大路圖圓圈最小面積 (較大，排除小路點)
-        MAX_AREA_THRESHOLD = 1500
+        # 【修正點】降低最小面積門檻以適應較低解析度的電腦路單截圖
+        MIN_AREA_THRESHOLD = 150  
+        MAX_AREA_THRESHOLD = 800  
         MAX_Y_LIMIT = int(h * 0.3) # Y 軸只允許前 30% 高度
 
     # 如果 ROI 擷取失敗 (高度過小)，則使用原始全圖或預設
     if roi.shape[0] < 50:
         print("[Detect Mode] ROI 擷取失敗，使用全圖")
         roi = img[0:h, 0:w]
+        if not is_long_mobile_screenshot:
+            # 如果是電腦圖但 ROI 失敗，且使用全圖，重新設定 Y 軸限制
+             MAX_Y_LIMIT = int(h * 0.3) 
+
 
     # --- 2. 圖像預處理 ---
     roi = cv2.convertScaleAbs(roi, alpha=1.4, beta=20)
@@ -380,7 +385,7 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
                 
                 # 3. Y 軸位置過濾 (僅對電腦路單模式有意義)
                 if not is_long_mobile_screenshot:
-                    center_y_in_original_img = y_start + y + h_box // 2 # 雖然這裡 y_start=0，但保持寫法以便除錯
+                    # 注意：y 是相對 ROI 的座標
                     if (y + h_box // 2) > MAX_Y_LIMIT:
                         continue # 排除路單下方的點
 
@@ -451,6 +456,8 @@ def handle_image(event):
         results = detect_last_n_results(image_path, is_long_mobile_screenshot=is_long_mobile_screenshot)
         
         if not results:
+            # 辨識失敗時，直接回傳錯誤訊息並結束
+            print("❌ 圖像辨識結果為空！")
             safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖或確保大路圖區塊清楚）。")
             return
 
@@ -492,6 +499,7 @@ def handle_image(event):
 
     except Exception as e:
         print("[處理圖片錯誤]", e)
+        # 避免程式碼崩潰導致無回覆，這裡捕獲所有錯誤並回覆
         safe_reply(event, "⚠️ 圖像處理過程出錯，請再試一次。")
 
 if __name__ == "__main__":
