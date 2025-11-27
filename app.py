@@ -196,9 +196,13 @@ def predict_from_recent_results(results):
     if not results:
         return "無", 0.0, 0.0, "無法判斷"
     feature = [1 if r == "莊" else 0 for r in reversed(results)]
+    
+    # 優化：不足 24 筆時，填充中性值 (0) 而非隨機值，提高模型輸入穩定性
     while len(feature) < 24:
-        feature.insert(0, 1 if random.random() > 0.5 else 0)
+        feature.insert(0, 0) 
+        
     X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
+    
     if model is None:
         banker = round(random.random() * 100, 1)
         player = round(100 - banker, 1)
@@ -299,38 +303,59 @@ def handle_text(event):
 
     safe_reply(event, "請選擇操作功能 👇")
 
-# === 改良版 圖像辨識（雙紅色區間 + 飽和度穩定 + 手機長圖專用）===
-def detect_last_n_results(image_path, n=24):
+# =========================================================================
+# === 【V2.0 圖像辨識優化版】 多模式適應 (電腦路單 / 手機長截圖) ===
+# =========================================================================
+def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
     img = cv2.imread(image_path)
     if img is None:
         return []
 
-    # 手機長截圖：擷取底部大路圖區域（約 60% ~ 100%）
     h, w = img.shape[:2]
-    roi = img[int(h * 0.6):h, 0:w]
 
-    # 強化對比 + 降噪（針對手機亮度差異）
+    # --- 1. 根據類型設定 ROI 和過濾參數 ---
+    if is_long_mobile_screenshot:
+        # 手機長截圖模式：ROI 在底部，需要排除上方 UI 雜訊 (如數字17)
+        print("[Detect Mode] 📱 手機長截圖模式 (底部 ROI)")
+        y_start = int(h * 0.75) # 從 75% 高度開始
+        y_end = int(h * 0.95)   # 到 95% 高度結束
+        roi = img[y_start:y_end, 0:w]
+        MIN_AREA_THRESHOLD = 50   # 手機圓圈最小面積 (較小)
+        MAX_AREA_THRESHOLD = 800
+        MAX_Y_LIMIT = roi.shape[0] # Y 軸不做進一步限制
+        
+    else:
+        # 電腦路單模式：ROI 涵蓋整個路單，需要嚴格的面積和 Y 座標過濾
+        print("[Detect Mode] 💻 電腦路單模式 (頂部 Y 限制)")
+        roi = img[0:h, 0:w] # 整個圖片作為 ROI
+        MIN_AREA_THRESHOLD = 400  # 電腦大路圖圓圈最小面積 (較大，排除小路點)
+        MAX_AREA_THRESHOLD = 1500
+        MAX_Y_LIMIT = int(h * 0.3) # Y 軸只允許前 30% 高度
+
+    # 如果 ROI 擷取失敗 (高度過小)，則使用原始全圖或預設
+    if roi.shape[0] < 50:
+        print("[Detect Mode] ROI 擷取失敗，使用全圖")
+        roi = img[0:h, 0:w]
+
+    # --- 2. 圖像預處理 ---
     roi = cv2.convertScaleAbs(roi, alpha=1.4, beta=20)
     roi = cv2.GaussianBlur(roi, (3, 3), 0)
-
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-    # ✅ 紅色分兩段（完整抓取亮紅＋暗紅）
+    # ... (顏色遮罩邏輯保持不變) ...
     lower_red1 = np.array([0, 100, 100])
     upper_red1 = np.array([10, 255, 255])
     lower_red2 = np.array([170, 100, 100])
     upper_red2 = np.array([180, 255, 255])
+    lower_blue = np.array([90, 100, 80])
+    upper_blue = np.array([130, 255, 255])
 
     mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
     mask_red = cv2.bitwise_or(mask_red1, mask_red2)
-
-    # ✅ 藍色範圍（涵蓋亮藍～深藍）
-    lower_blue = np.array([90, 100, 80])
-    upper_blue = np.array([130, 255, 255])
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
 
-    # ✅ 形態學操作（修補圓圈破碎、濾除雜點）
+    # 形態學操作
     kernel = np.ones((3, 3), np.uint8)
     mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_CLOSE, kernel, iterations=2)
@@ -340,45 +365,56 @@ def detect_last_n_results(image_path, n=24):
     contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     circles = []
-    for cnt in contours_red:
-        area = cv2.contourArea(cnt)
-        if area > 60:  # 最小面積濾掉雜點
-            x, y, w_box, h_box = cv2.boundingRect(cnt)
-            circles.append((x + w_box // 2, "莊"))
+    MAX_ASPECT_RATIO = 1.8 # 限制長寬比，排除長條狀雜訊 (如數字)
 
-    for cnt in contours_blue:
-        area = cv2.contourArea(cnt)
-        if area > 60:
-            x, y, w_box, h_box = cv2.boundingRect(cnt)
-            circles.append((x + w_box // 2, "閒"))
+    def filter_and_append_circles(contours, result_type):
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            # 1. 面積過濾
+            if MIN_AREA_THRESHOLD < area < MAX_AREA_THRESHOLD:
+                x, y, w_box, h_box = cv2.boundingRect(cnt)
+                
+                # 2. 長寬比過濾：排除細長物件
+                if h_box == 0 or w_box == 0: continue
+                aspect_ratio = max(w_box / h_box, h_box / w_box)
+                
+                # 3. Y 軸位置過濾 (僅對電腦路單模式有意義)
+                if not is_long_mobile_screenshot:
+                    center_y_in_original_img = y_start + y + h_box // 2 # 雖然這裡 y_start=0，但保持寫法以便除錯
+                    if (y + h_box // 2) > MAX_Y_LIMIT:
+                        continue # 排除路單下方的點
 
-    # 依 x 座標由右至左（越右邊越新）
-    results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
+                if aspect_ratio < MAX_ASPECT_RATIO:
+                    center_x = x + w_box // 2
+                    circles.append((center_x, result_type))
 
-    # 若沒辨識出任何紅色，代表紅閾值可能太嚴，可自動補強一次偏亮紅區
-    if not any(r == "莊" for r in results):
+    filter_and_append_circles(contours_red, "莊")
+    filter_and_append_circles(contours_blue, "閒")
+
+    # 若沒辨識出任何紅色，進行補強（使用相同的過濾邏輯）
+    if not any(r == "莊" for _, r in circles):
+        print("[Detect] 嘗試紅色補強...")
         lower_red_bright = np.array([0, 70, 180])
         upper_red_bright = np.array([10, 255, 255])
         mask_red_bright = cv2.inRange(hsv, lower_red_bright, upper_red_bright)
-        contours_red2, _ = cv2.findContours(mask_red_bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours_red2:
-            area = cv2.contourArea(cnt)
-            if area > 60:
-                x, y, w_box, h_box = cv2.boundingRect(cnt)
-                circles.append((x + w_box // 2, "莊"))
-        results = [r for _, r in sorted(circles, key=lambda t: -t[0])]    
-    # === Debug 標註區 ===
-    import os  # 確保有引入 os 模組
-    base, ext = os.path.splitext(image_path)   # 自動抓出副檔名（.jpg/.png）
-    debug_path = f"{base}_debug{ext}"          # 產生對應副檔名的 debug 圖
+        
+        contours_red_bright, _ = cv2.findContours(mask_red_bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        filter_and_append_circles(contours_red_bright, "莊") 
 
+    # 依 x 座標由右至左（越右邊越新）
+    results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
+    
+    # === Debug 標註區 (保持不變) ===
+    base, ext = os.path.splitext(image_path)
+    debug_path = f"{base}_debug{ext}"
     debug_img = roi.copy()
+    
     for x, result in circles:
         color = (0, 0, 255) if result == "莊" else (255, 0, 0)
         cv2.circle(debug_img, (x, int(roi.shape[0] / 2)), 10, color, 2)
 
     cv2.imwrite(debug_path, debug_img)
-    print(f"[debug] 已輸出標註圖：{debug_path}")
+    print(f"[debug] ✅ 已輸出標註圖：{debug_path}")
     print("[detect_last_n_results] 辨識結果：", results[:n])
     return results[:n]
 
@@ -403,7 +439,17 @@ def handle_image(event):
         with open(image_path, "wb") as f:
             f.write(content)
 
-        results = detect_last_n_results(image_path)
+        # 讀取圖片以判斷類型
+        temp_img = cv2.imread(image_path)
+        h, w = temp_img.shape[:2]
+        
+        # 【重要：圖片類型判斷】
+        # 判斷是手機長截圖還是電腦路單圖：若圖片高度是寬度的 1.5 倍以上，則視為手機長截圖
+        aspect_ratio = h / w
+        is_long_mobile_screenshot = (aspect_ratio >= 1.5) 
+        
+        results = detect_last_n_results(image_path, is_long_mobile_screenshot=is_long_mobile_screenshot)
+        
         if not results:
             safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖或確保大路圖區塊清楚）。")
             return
@@ -415,8 +461,10 @@ def handle_image(event):
 
         # AI 預測（同步，因為要產生回覆）
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
+        # 優化：不足 24 筆時，填充中性值 (0)
         while len(feature) < 24:
-            feature.insert(0, 1 if random.random() > 0.5 else 0)
+            feature.insert(0, 0)
+            
         X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
 
         if model is None:
