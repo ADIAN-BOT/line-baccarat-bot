@@ -243,9 +243,14 @@ def weighted_tie_prediction(user_id):
     total_weight = banker_weight + player_weight
     banker_weight /= total_weight
     player_weight /= total_weight
-    prediction = random.choices(["莊", "閒"], weights=[banker_weight, player_weight])[0]
-    pair_weights = predict_pairs(results)
-    return prediction, round(banker_weight*100, 1), round(player_weight*100, 1), pair_weights
+　　　# *** 修正點：直接選擇權重高者 ***
+    if banker_weight >= player_weight:
+        prediction = "莊"
+    else:
+        prediction = "閒"
+    
+    pair_weights = predict_pairs(results)
+    return prediction, round(banker_weight*100, 1), round(player_weight*100, 1), pair_weights
 
 # === 處理文字訊息 ===
 @handler.add(MessageEvent, message=TextMessageContent)
