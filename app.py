@@ -74,7 +74,7 @@ def clean_tmp(interval=3600, expire=1800):
 
 threading.Thread(target=clean_tmp, daemon=True).start()
 
-# === 封裝非同步 DB 操作（專用小函式） ===
+# === 封裝非同步 DB 操作（專用小函式）===
 def async_insert_record(line_user_id, result, extra: dict = None):
     def job():
         try:
@@ -243,14 +243,15 @@ def weighted_tie_prediction(user_id):
     total_weight = banker_weight + player_weight
     banker_weight /= total_weight
     player_weight /= total_weight
+    
     # *** 修正點：直接選擇權重高者 ***
     if banker_weight >= player_weight:
         prediction = "莊"
     else:
         prediction = "閒"
-    
-    pair_weights = predict_pairs(results)
-    return prediction, round(banker_weight*100, 1), round(player_weight*100, 1), pair_weights
+        
+    pair_weights = predict_pairs(results)
+    return prediction, round(banker_weight*100, 1), round(player_weight*100, 1), pair_weights
 
 # === 處理文字訊息 ===
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -325,7 +326,7 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
         y_start = int(h * 0.75) # 從 75% 高度開始
         y_end = int(h * 0.95)   # 到 95% 高度結束
         roi = img[y_start:y_end, 0:w]
-        MIN_AREA_THRESHOLD = 50   # 手機圓圈最小面積 (較小)
+        MIN_AREA_THRESHOLD = 50     # 手機圓圈最小面積 (較小)
         MAX_AREA_THRESHOLD = 800
         MAX_Y_LIMIT = roi.shape[0] # Y 軸不做進一步限制
         
