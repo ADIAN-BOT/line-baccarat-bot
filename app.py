@@ -243,7 +243,7 @@ def weighted_tie_prediction(user_id):
     total_weight = banker_weight + player_weight
     banker_weight /= total_weight
     player_weight /= total_weight
-　　　# *** 修正點：直接選擇權重高者 ***
+    # *** 修正點：直接選擇權重高者 ***
     if banker_weight >= player_weight:
         prediction = "莊"
     else:
