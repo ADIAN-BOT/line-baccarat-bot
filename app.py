@@ -15,10 +15,10 @@ import joblib
 from linebot.v3 import WebhookHandler
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
 from linebot.v3.messaging import (
-    TextMessage, QuickReply, QuickReplyItem, MessageAction, ReplyMessageRequest
+    TextMessage, QuickReply, QuickReplyItem, MessageAction, ReplyMessageRequest,
+    PushMessageRequest, Configuration, ApiClient, MessagingApi, MessagingApiBlob
 )
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import MessagingApi, MessagingApiBlob, Configuration, ApiClient
 
 # === 模型載入 ===
 try:
@@ -35,6 +35,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # === 初始化 LINE ===
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+ADMIN_LINE_ID = os.getenv("ADMIN_LINE_ID") # 從環境變數讀取管理員 ID
 
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
@@ -45,12 +46,35 @@ blob_api = MessagingApiBlob(api_client)
 # === Flask App ===
 app = Flask(__name__)
 
+# === 🛠️ 新增：管理員通知邏輯 (帶按鈕) ===
+def notify_admin_new_user(user_code):
+    """
+    發送帶有快速回覆按鈕的通知給管理員 (此操作會消耗 PUSH 次數)
+    """
+    if not ADMIN_LINE_ID:
+        print("⚠️ 未設定 ADMIN_LINE_ID，無法發送管理通知")
+        return
+
+    # 建立管理員專用的審核按鈕
+    admin_quick_reply = QuickReply(items=[
+        QuickReplyItem(action=MessageAction(label="✅ 核准授權", text=f"#核准_{user_code}")),
+        QuickReplyItem(action=MessageAction(label="❌ 拒絕/關閉", text=f"#取消_{user_code}"))
+    ])
+
+    try:
+        push_msg = PushMessageRequest(
+            to=ADMIN_LINE_ID,
+            messages=[TextMessage(
+                text=f"🆕 偵測到新用戶申請！\n🆔 UID: {user_code}\n\n請點擊下方按鈕進行審核：",
+                quick_reply=admin_quick_reply
+            )]
+        )
+        messaging_api.push_message(push_msg)
+    except Exception as e:
+        print(f"❌ 管理員 Push 通知失敗: {e}")
+
 # === 背景清理 /tmp/ 圖片（daemon thread）===
 def clean_tmp(interval=3600, expire=1800):
-    """
-    interval: 檢查間隔（秒）
-    expire: 超過多久未修改的檔案會被刪除（秒）
-    """
     while True:
         try:
             now = time.time()
@@ -64,7 +88,6 @@ def clean_tmp(interval=3600, expire=1800):
                             os.remove(fp)
                             deleted += 1
                     except Exception:
-                        # 權限或 race condition：忽略單檔錯誤
                         pass
             if deleted:
                 print(f"[clean_tmp] ✅ 已清理 {deleted} 個舊檔案")
@@ -74,7 +97,7 @@ def clean_tmp(interval=3600, expire=1800):
 
 threading.Thread(target=clean_tmp, daemon=True).start()
 
-# === 封裝非同步 DB 操作（專用小函式）===
+# === 封裝非同步 DB 操作 ===
 def async_insert_record(line_user_id, result, extra: dict = None):
     def job():
         try:
@@ -84,14 +107,6 @@ def async_insert_record(line_user_id, result, extra: dict = None):
             supabase.table("records").insert(payload).execute()
         except Exception as e:
             print("[async_insert_record] Supabase insert failed:", e)
-    threading.Thread(target=job, daemon=True).start()
-
-def async_insert_member(member_dict):
-    def job():
-        try:
-            supabase.table("members").insert(member_dict).execute()
-        except Exception as e:
-            print("[async_insert_member] Supabase insert member failed:", e)
     threading.Thread(target=job, daemon=True).start()
 
 def async_update_member_prediction(line_user_id, active: bool):
@@ -109,7 +124,6 @@ def callback():
         return '', 200
     signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)
-    print("[Webhook 收到訊息]", body)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -123,34 +137,30 @@ def callback():
 def get_or_create_user(user_id):
     try:
         res = supabase.table("members").select("*").eq("line_user_id", user_id).execute()
-    except Exception as e:
-        print("[get_or_create_user] Supabase select failed:", e)
-        res = None
-
-    if res and getattr(res, "data", None):
-        return res.data[0]
-
-    # 若不存在 => 建一筆 member（同步插入，因為需要回傳 user info）
-    user_code = str(uuid.uuid4())
-    new_user = {
-        "line_user_id": user_id,
-        "user_code": user_code,
-        "is_authorized": False,
-        "prediction_active": False
-    }
-    try:
+        if res and getattr(res, "data", None) and len(res.data) > 0:
+            return res.data[0]
+        
+        # 若不存在 => 生成新 UID 並建一筆 member
+        user_code = str(uuid.uuid4())
+        new_user = {
+            "line_user_id": user_id,
+            "user_code": user_code,
+            "is_authorized": False,
+            "prediction_active": False
+        }
         supabase.table("members").insert(new_user).execute()
+        return new_user
     except Exception as e:
-        # 若插入失敗，也回傳 new_user（稍後可由 admin 處理）
-        print("[get_or_create_user] insert member failed:", e)
-    return new_user
+        print("[get_or_create_user] error:", e)
+        return None
 
-# === 授權檢查（改為不顯示管理連結）===
+# === 授權檢查 ===
 def check_user_authorized(event, user):
-    if not user.get("is_authorized", False):
+    if not user or not user.get("is_authorized", False):
+        user_code = user['user_code'] if user else "未知"
         safe_reply(
             event,
-            f"🔒 尚未授權：你的 UID 為：\n🆔 {user['user_code']}\n請聯絡管理員處理開通。"
+            f"🔒 尚未授權：你的 UID 為：\n🆔 {user_code}\n已同步通知管理員開通，請稍候。"
         )
         return False
     return True
@@ -196,8 +206,6 @@ def predict_from_recent_results(results):
     if not results:
         return "無", 0.0, 0.0, "無法判斷"
     feature = [1 if r == "莊" else 0 for r in reversed(results)]
-    
-    # 優化：不足 24 筆時，填充中性值 (0) 而非隨機值，提高模型輸入穩定性
     while len(feature) < 24:
         feature.insert(0, 0) 
         
@@ -215,10 +223,7 @@ def predict_from_recent_results(results):
         return results[0], banker, player, suggestion
     except Exception as e:
         print("[predict_from_recent_results] model predict error:", e)
-        banker = round(random.random() * 100, 1)
-        player = round(100 - banker, 1)
-        suggestion = "莊" if banker >= player else "閒"
-        return results[0], banker, player, suggestion
+        return results[0], 50.0, 50.0, "分析錯誤"
 
 def weighted_tie_prediction(user_id):
     try:
@@ -244,7 +249,6 @@ def weighted_tie_prediction(user_id):
     banker_weight /= total_weight
     player_weight /= total_weight
     
-    # *** 修正點：直接選擇權重高者 ***
     if banker_weight >= player_weight:
         prediction = "莊"
     else:
@@ -258,14 +262,35 @@ def weighted_tie_prediction(user_id):
 def handle_text(event):
     msg = event.message.text.strip()
     user_id = event.source.user_id
+
+    # 🛠️ 管理員審核指令處理
+    if (msg.startswith("#核准_") or msg.startswith("#取消_")) and user_id == ADMIN_LINE_ID:
+        try:
+            target_code = msg.split("_")[1]
+            is_auth = msg.startswith("#核准")
+            supabase.table("members").update({"is_authorized": is_auth}).eq("user_code", target_code).execute()
+            status_text = "已核准開通" if is_auth else "已關閉權限"
+            safe_reply(event, f"✅ 管理員操作成功：\n🆔 UID: {target_code}\n📝 狀態：{status_text}")
+            return
+        except Exception as e:
+            safe_reply(event, f"⚠️ 指令執行出錯：{e}")
+            return
+
     user = get_or_create_user(user_id)
-    if not check_user_authorized(event, user):
-        return
 
     if msg == "開始預測":
-        # 背景非同步更新 member 狀態（不阻塞 webhook 回應）
+        # 檢查是否授權，若無則通知管理員
+        if not user or not user.get("is_authorized", False):
+            notify_admin_new_user(user.get("user_code"))
+            safe_reply(event, f"🔒 尚未授權：你的 UID 為：\n🆔 {user['user_code']}\n已同步通知管理員審核，請稍後。")
+            return
+        
         async_update_member_prediction(user_id, True)
         safe_reply(event, "✅ 已啟用 AI 預測模式，請上傳房間圖片開始分析。")
+        return
+
+    # 一般功能授權牆
+    if not check_user_authorized(event, user):
         return
 
     if msg == "停止分析":
@@ -274,14 +299,11 @@ def handle_text(event):
         return
 
     if msg in ["莊", "閒"]:
-        # 非同步寫入紀錄，不阻塞回覆
         async_insert_record(user_id, msg)
-        # 讀取最近紀錄（同步）用於即時預測
         try:
             history = supabase.table("records").select("result").eq("line_user_id", user_id).order("id", desc=True).limit(10).execute()
             results = [r["result"] for r in reversed(history.data)]
         except Exception as e:
-            print("[handle_text] fetch history failed:", e)
             results = [msg]
         last_result, banker, player, suggestion = predict_from_recent_results(results)
         safe_reply(event,
@@ -302,212 +324,95 @@ def handle_text(event):
             f"🔵 閒對 {pair_weights['閒對']}%\n"
             f"🍀 幸運六 {pair_weights['幸運六']}%"
         )
-        # 非同步保存三寶預測備註
         async_insert_record(user_id, "和局預測", extra={"pair_prediction": str(pair_weights)})
         safe_reply(event, reply)
         return
 
     safe_reply(event, "請選擇操作功能 👇")
 
-# =========================================================================
-# === 【V2.1 圖像辨識優化版】 多模式適應 (電腦路單 / 手機長截圖) ===
-# =========================================================================
+# === 【V2.1 圖像辨識優化版】 ===
 def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
     img = cv2.imread(image_path)
-    if img is None:
-        return []
-
+    if img is None: return []
     h, w = img.shape[:2]
 
-    # --- 1. 根據類型設定 ROI 和過濾參數 ---
     if is_long_mobile_screenshot:
-        # 📱 手機長截圖模式：ROI 在底部，需要排除上方 UI 雜訊 (如數字17)
-        print("[Detect Mode] 📱 手機長截圖模式 (底部 ROI)")
-        y_start = int(h * 0.75) # 從 75% 高度開始
-        y_end = int(h * 0.95)   # 到 95% 高度結束
+        y_start, y_end = int(h * 0.75), int(h * 0.95)
         roi = img[y_start:y_end, 0:w]
-        MIN_AREA_THRESHOLD = 50     # 手機圓圈最小面積 (較小)
-        MAX_AREA_THRESHOLD = 800
-        MAX_Y_LIMIT = roi.shape[0] # Y 軸不做進一步限制
-        
+        MIN_AREA, MAX_AREA = 50, 800
+        MAX_Y_LIMIT = roi.shape[0]
     else:
-        # 💻 電腦路單模式：ROI 涵蓋整個路單，需要嚴格的面積和 Y 座標過濾
-        print("[Detect Mode] 💻 電腦路單模式 (頂部 Y 限制)")
-        roi = img[0:h, 0:w] # 整個圖片作為 ROI
-        # 【修正點】降低最小面積門檻以適應較低解析度的電腦路單截圖
-        MIN_AREA_THRESHOLD = 150  
-        MAX_AREA_THRESHOLD = 800  
-        MAX_Y_LIMIT = int(h * 0.3) # Y 軸只允許前 30% 高度
-
-    # 如果 ROI 擷取失敗 (高度過小)，則使用原始全圖或預設
-    if roi.shape[0] < 50:
-        print("[Detect Mode] ROI 擷取失敗，使用全圖")
         roi = img[0:h, 0:w]
-        if not is_long_mobile_screenshot:
-            # 如果是電腦圖但 ROI 失敗，且使用全圖，重新設定 Y 軸限制
-             MAX_Y_LIMIT = int(h * 0.3) 
+        MIN_AREA, MAX_AREA = 150, 800
+        MAX_Y_LIMIT = int(h * 0.3)
 
-
-    # --- 2. 圖像預處理 ---
     roi = cv2.convertScaleAbs(roi, alpha=1.4, beta=20)
-    roi = cv2.GaussianBlur(roi, (3, 3), 0)
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(cv2.GaussianBlur(roi, (3, 3), 0), cv2.COLOR_BGR2HSV)
 
-    # ... (顏色遮罩邏輯保持不變) ...
-    lower_red1 = np.array([0, 100, 100])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 100, 100])
-    upper_red2 = np.array([180, 255, 255])
-    lower_blue = np.array([90, 100, 80])
-    upper_blue = np.array([130, 255, 255])
-
-    mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    mask_red = cv2.bitwise_or(mask_red1, mask_red2)
-    mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
-
-    # 形態學操作
-    kernel = np.ones((3, 3), np.uint8)
-    mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_CLOSE, kernel, iterations=2)
-    mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    # 找出紅藍圓位置
-    contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    m_r1 = cv2.inRange(hsv, np.array([0, 100, 100]), np.array([10, 255, 255]))
+    m_r2 = cv2.inRange(hsv, np.array([170, 100, 100]), np.array([180, 255, 255]))
+    mask_red = cv2.bitwise_or(m_r1, m_r2)
+    mask_blue = cv2.inRange(hsv, np.array([90, 100, 80]), np.array([130, 255, 255]))
 
     circles = []
-    MAX_ASPECT_RATIO = 1.8 # 限制長寬比，排除長條狀雜訊 (如數字)
+    def filter_cnts(cnts, label):
+        for c in cnts:
+            area = cv2.contourArea(c)
+            if MIN_AREA < area < MAX_AREA:
+                x, y, wb, hb = cv2.boundingRect(c)
+                if not is_long_mobile_screenshot and (y + hb//2) > MAX_Y_LIMIT: continue
+                if max(wb/hb, hb/wb) < 1.8:
+                    circles.append((x + wb//2, label))
 
-    def filter_and_append_circles(contours, result_type):
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            # 1. 面積過濾
-            if MIN_AREA_THRESHOLD < area < MAX_AREA_THRESHOLD:
-                x, y, w_box, h_box = cv2.boundingRect(cnt)
-                
-                # 2. 長寬比過濾：排除細長物件
-                if h_box == 0 or w_box == 0: continue
-                aspect_ratio = max(w_box / h_box, h_box / w_box)
-                
-                # 3. Y 軸位置過濾 (僅對電腦路單模式有意義)
-                if not is_long_mobile_screenshot:
-                    # 注意：y 是相對 ROI 的座標
-                    if (y + h_box // 2) > MAX_Y_LIMIT:
-                        continue # 排除路單下方的點
+    c_r, _ = cv2.findContours(cv2.morphologyEx(mask_red, cv2.MORPH_CLOSE, np.ones((3,3)), iterations=2), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    c_b, _ = cv2.findContours(cv2.morphologyEx(mask_blue, cv2.MORPH_CLOSE, np.ones((3,3)), iterations=2), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filter_cnts(c_r, "莊")
+    filter_cnts(c_b, "閒")
 
-                if aspect_ratio < MAX_ASPECT_RATIO:
-                    center_x = x + w_box // 2
-                    circles.append((center_x, result_type))
-
-    filter_and_append_circles(contours_red, "莊")
-    filter_and_append_circles(contours_blue, "閒")
-
-    # 若沒辨識出任何紅色，進行補強（使用相同的過濾邏輯）
-    if not any(r == "莊" for _, r in circles):
-        print("[Detect] 嘗試紅色補強...")
-        lower_red_bright = np.array([0, 70, 180])
-        upper_red_bright = np.array([10, 255, 255])
-        mask_red_bright = cv2.inRange(hsv, lower_red_bright, upper_red_bright)
-        
-        contours_red_bright, _ = cv2.findContours(mask_red_bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        filter_and_append_circles(contours_red_bright, "莊") 
-
-    # 依 x 座標由右至左（越右邊越新）
     results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
-    
-    # === Debug 標註區 (保持不變) ===
-    base, ext = os.path.splitext(image_path)
-    debug_path = f"{base}_debug{ext}"
-    debug_img = roi.copy()
-    
-    for x, result in circles:
-        color = (0, 0, 255) if result == "莊" else (255, 0, 0)
-        cv2.circle(debug_img, (x, int(roi.shape[0] / 2)), 10, color, 2)
-
-    cv2.imwrite(debug_path, debug_img)
-    print(f"[debug] ✅ 已輸出標註圖：{debug_path}")
-    print("[detect_last_n_results] 辨識結果：", results[:n])
     return results[:n]
 
-# === 圖像事件處理（使用改良版辨識）===
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event):
     user_id = event.source.user_id
-    message_id = event.message.id
     user = get_or_create_user(user_id)
-
-    if not check_user_authorized(event, user):
-        return
-    if not user.get("prediction_active", False):
-        safe_reply(event, "⚠️ 請先輸入『開始預測』以啟用分析。")
+    if not check_user_authorized(event, user) or not user.get("prediction_active", False):
         return
 
     try:
-        image_path = f"/tmp/{message_id}.jpg"
-        content = blob_api.get_message_content(message_id)
-        if hasattr(content, "iter_content"):
-            content = b"".join(content.iter_content())
+        image_path = f"/tmp/{event.message.id}.jpg"
+        content = blob_api.get_message_content(event.message.id)
         with open(image_path, "wb") as f:
-            f.write(content)
+            f.write(b"".join(content.iter_content()) if hasattr(content, "iter_content") else content)
 
-        # 讀取圖片以判斷類型
         temp_img = cv2.imread(image_path)
         h, w = temp_img.shape[:2]
-        
-        # 【重要：圖片類型判斷】
-        # 判斷是手機長截圖還是電腦路單圖：若圖片高度是寬度的 1.5 倍以上，則視為手機長截圖
-        aspect_ratio = h / w
-        is_long_mobile_screenshot = (aspect_ratio >= 1.5) 
-        
-        results = detect_last_n_results(image_path, is_long_mobile_screenshot=is_long_mobile_screenshot)
+        results = detect_last_n_results(image_path, is_long_mobile_screenshot=(h/w >= 1.5))
         
         if not results:
-            # 辨識失敗時，直接回傳錯誤訊息並結束
-            print("❌ 圖像辨識結果為空！")
-            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖（建議橫向截圖或確保大路圖區塊清楚）。")
+            safe_reply(event, "⚠️ 圖像辨識失敗，請重新上傳清晰的大路圖。")
             return
 
-        # 非同步寫入 records（避免阻塞 webhook）
         for r in results:
-            if r in ["莊", "閒"]:
-                async_insert_record(user_id, r)
+            if r in ["莊", "閒"]: async_insert_record(user_id, r)
 
-        # AI 預測（同步，因為要產生回覆）
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
-        # 優化：不足 24 筆時，填充中性值 (0)
-        while len(feature) < 24:
-            feature.insert(0, 0)
-            
-        X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
+        while len(feature) < 24: feature.insert(0, 0)
+        X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(24)])
 
         if model is None:
             banker = round(random.random() * 100, 1)
-            player = round(100 - banker, 1)
-            suggestion = "莊" if banker >= player else "閒"
+            suggestion = "莊" if banker >= 50 else "閒"
+            player = 100 - banker
         else:
-            try:
-                pred = model.predict_proba(X)[0]
-                banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
-                suggestion = "莊" if pred[1] >= pred[0] else "閒"
-            except Exception as e:
-                print("[handle_image] model predict error:", e)
-                banker = round(random.random() * 100, 1)
-                player = round(100 - banker, 1)
-                suggestion = "莊" if banker >= player else "閒"
+            pred = model.predict_proba(X)[0]
+            banker, player = round(pred[1]*100, 1), round(pred[0]*100, 1)
+            suggestion = "莊" if pred[1] >= pred[0] else "閒"
 
-        reply = (
-            f"📸 圖像辨識完成\n\n"
-            f"🔙 已記錄走勢\n" # *** 替換原本的最後一顆結果 ***
-            f"🔴 莊勝率：{banker}%\n🔵 閒勝率：{player}%\n\n"
-            f"📈 AI 推論下一顆：{suggestion}"
-        )
-        safe_reply(event, reply)
-
+        safe_reply(event, f"📸 圖像辨識完成\n\n🔙 已記錄走勢\n🔴 莊勝率：{banker}%\n🔵 閒勝率：{player}%\n\n📈 AI 推論下一顆：{suggestion}")
     except Exception as e:
-        print("[處理圖片錯誤]", e)
-        # 避免程式碼崩潰導致無回覆，這裡捕獲所有錯誤並回覆
-        safe_reply(event, "⚠️ 圖像處理過程出錯，請再試一次。")
+        print("[handle_image] error:", e)
+        safe_reply(event, "⚠️ 圖像處理出錯。")
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), debug=False)
