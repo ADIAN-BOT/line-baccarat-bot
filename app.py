@@ -35,7 +35,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # === 初始化 LINE ===
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-ADMIN_LINE_ID = os.getenv("ADMIN_LINE_ID") 
+ADMIN_LINE_ID = os.getenv("ADMIN_LINE_ID") # 從環境變數讀取管理員 ID
 
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
@@ -46,12 +46,16 @@ blob_api = MessagingApiBlob(api_client)
 # === Flask App ===
 app = Flask(__name__)
 
-# === 🛠️ 管理員通知邏輯 ===
+# === 🛠️ 管理員通知邏輯 (帶按鈕) ===
 def notify_admin_new_user(user_code):
+    """
+    發送帶有快速回覆按鈕的通知給管理員
+    """
     if not ADMIN_LINE_ID:
         print("⚠️ 未設定 ADMIN_LINE_ID，無法發送管理通知")
         return
 
+    # 建立管理員專用的審核按鈕
     admin_quick_reply = QuickReply(items=[
         QuickReplyItem(action=MessageAction(label="✅ 核准授權", text=f"#核准_{user_code}")),
         QuickReplyItem(action=MessageAction(label="❌ 拒絕/關閉", text=f"#取消_{user_code}"))
@@ -69,7 +73,7 @@ def notify_admin_new_user(user_code):
     except Exception as e:
         print(f"❌ 管理員 Push 通知失敗: {e}")
 
-# === 背景清理 /tmp/ 檔案 ===
+# === 背景清理 /tmp/ 圖片（daemon thread）===
 def clean_tmp(interval=3600, expire=1800):
     while True:
         try:
@@ -129,14 +133,14 @@ def callback():
         abort(500)
     return 'OK'
 
-# === 🛡️ 建立或取得用戶（修正連線與未知 UID 問題）===
+# === 🛡️ 建立或取得用戶（修正防護版）===
 def get_or_create_user(user_id):
     try:
         res = supabase.table("members").select("*").eq("line_user_id", user_id).execute()
         if res and hasattr(res, "data") and len(res.data) > 0:
             return res.data[0]
         
-        # 若不存在 => 生成新 UID
+        # 若不存在 => 生成新 UID 並建一筆 member
         user_code = str(uuid.uuid4())
         new_user = {
             "line_user_id": user_id,
@@ -147,26 +151,30 @@ def get_or_create_user(user_id):
         try:
             supabase.table("members").insert(new_user).execute()
         except:
-            print("⚠️ 預先建立用戶失敗，連線不穩")
+            print("⚠️ 插入資料庫失敗")
         return new_user
     except Exception as e:
-        print(f"❌ [get_or_create_user] 資料庫異常: {e}")
-        # 關鍵修正：若資料庫掛了，不回傳 None，回傳一個安全物件避免 'NoneType' 錯誤
+        print("[get_or_create_user] error:", e)
+        # 關鍵：若資料庫連不通，回傳一個安全字典而不是 None
         return {"line_user_id": user_id, "user_code": "系統連線中...", "is_authorized": False}
 
-# === 🛡️ 授權檢查（修正連線異常時的提示）===
+# === 🛡️ 授權檢查（修正防護版）===
 def check_user_authorized(event, user):
+    # 防止 user 為 None 導致程式崩潰
     if not user:
-        safe_reply(event, "⚠️ 伺服器忙碌中，請稍後再試。")
+        safe_reply(event, "⚠️ 系統連線異常，請稍後再試。")
         return False
 
     if not user.get("is_authorized", False):
-        user_code = user.get('user_code', '取得中...')
+        user_code = user.get('user_code', '未知')
         if user_code == "系統連線中...":
-            safe_reply(event, "🌐 暫時無法連線至資料庫，請稍候片刻再按一次「開始預測」。")
+            safe_reply(event, "🌐 資料庫連線不穩，請稍候片刻再按一次「開始預測」。")
         else:
             notify_admin_new_user(user_code)
-            safe_reply(event, f"🔒 尚未授權：你的 UID 為：\n🆔 {user_code}\n已同步通知管理員開通，請稍候。")
+            safe_reply(
+                event,
+                f"🔒 尚未授權：你的 UID 為：\n🆔 {user_code}\n已同步通知管理員開通，請稍候。"
+            )
         return False
     return True
 
@@ -268,7 +276,7 @@ def handle_text(event):
     msg = event.message.text.strip()
     user_id = event.source.user_id
 
-    # 管理員審核指令處理
+    # 🛠️ 管理員審核指令處理
     if (msg.startswith("#核准_") or msg.startswith("#取消_")) and user_id == ADMIN_LINE_ID:
         try:
             target_code = msg.split("_")[1]
@@ -284,7 +292,7 @@ def handle_text(event):
     user = get_or_create_user(user_id)
 
     if msg == "開始預測":
-        # 🛡️ 整合授權檢查
+        # 先檢查授權
         if not check_user_authorized(event, user):
             return
         
@@ -333,7 +341,7 @@ def handle_text(event):
 
     safe_reply(event, "請選擇操作功能 👇")
 
-# === 【圖像辨識核心邏輯】 ===
+# === 【V2.1 圖像辨識優化版】 ===
 def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
     img = cv2.imread(image_path)
     if img is None: return []
@@ -375,18 +383,16 @@ def detect_last_n_results(image_path, n=24, is_long_mobile_screenshot=True):
     results = [r for _, r in sorted(circles, key=lambda t: -t[0])]
     return results[:n]
 
-# === 處理圖像訊息 ===
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image(event):
     user_id = event.source.user_id
     user = get_or_create_user(user_id)
     
-    # 🛡️ 整合授權檢查與模式檢查
+    # 這裡也要檢查授權，防止 NoneType 報錯
     if not check_user_authorized(event, user):
         return
-    
+        
     if not user.get("prediction_active", False):
-        safe_reply(event, "⚠️ 請先點擊「開始預測」按鈕開啟模式。")
         return
 
     try:
@@ -408,7 +414,7 @@ def handle_image(event):
 
         feature = [1 if r == "莊" else 0 for r in reversed(results)]
         while len(feature) < 24: feature.insert(0, 0)
-        X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(24)])
+        X = pd.DataFrame([feature], columns=[f"prev_{i}" for i in range(len(feature))])
 
         if model is None:
             banker = round(random.random() * 100, 1)
